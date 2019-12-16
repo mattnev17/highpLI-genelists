@@ -1,0 +1,624 @@
+---
+title: "ukbbGene"
+output: html_document
+---
+## Load Libraries and Gene Lists
+```{r libraries, include=FALSE, message=FALSE, warning=FALSE}
+
+##Libraries
+library(tidyverse)
+library(tidymodels)
+library(UpSetR)
+library(data.table)
+library(ggpubr)
+library(patchwork)
+
+```
+
+
+### Gene lists
+```{r geneLists, echo=FALSE, fig.height=7, fig.width=10, warning=FALSE, dpi = 400}
+#geneList <- readRDS("../matrixSource/geneListUKBBrepro.rds")
+geneList <- readRDS("../matrixSource/geneListUKBB.rds") 
+disease <- geneList %>% 
+  filter(geneGroup == "disease")
+cellEssential <- geneList %>% 
+  filter(geneGroup == "cellEssential")
+noPheno <- geneList %>% 
+  filter(geneGroup == "noPheno")
+lowPLIpheno <- geneList %>% 
+  filter(geneGroup == "lowPLIpheno")
+other <- geneList %>% 
+  filter(geneGroup == "base")
+#repro <- geneList %>% 
+  #filter(geneGroup == "reproGene")
+
+#Gene counts
+as.data.frame(geneList) %>% 
+  mutate(noPheno= ifelse(geneGroup == "noPheno", 1, 0)) %>% 
+  mutate(cellEssential= ifelse(geneGroup == "cellEssential", 1, 0)) %>%
+  mutate(disease= ifelse(geneGroup == "disease", 1, 0)) %>% 
+  mutate(lowPLIpheno= ifelse(geneGroup == "lowPLIpheno", 1, 0)) %>% 
+  mutate(other= ifelse(geneGroup == "base", 1, 0)) %>% 
+  upset(sets = c("noPheno", "cellEssential",  "disease", "lowPLIpheno", "other"), sets.bar.color = "#56B4E9", text.scale = 2)
+```
+
+## Pheno Prep
+### All Phenos
+```{r phenos}
+#Load all non-related white british individuals from Eugene
+indvToInclude <- read_tsv("wba.martin.txt", col_names = "eid", col_types = "c")
+#Phenos of interest + age, sex, PCs etc
+phenosAll <- read_tsv("mn7_fields2.out", skip = 1, col_names = c("eid", "sex", "childrenFathered_0", "childrenFathered_1", "childrenFathered_2", "liveBirths_0", "liveBirths_1", "liveBirths_2", "any_complication_0", "any_complication_1", "any_complication_2", "miscarriage_0", "miscarriage_1", "miscarriage_2", "age", "whiteBritish", "pc.1", "pc.2", "pc.3", "pc.4", "pc.5", "pc.6", "pc.7", "pc.8", "pc.9", "pc.10", "pc.11", "pc.12", "pc.13", "pc.14", "pc.15", "pc.16", "pc.17", "pc.18", "pc.19", "pc.20", "pc.21", "pc.22", "pc.23", "pc.24", "pc.25", "pc.26", "pc.27", "pc.28", "pc.29", "pc.30", "pc.31", "pc.32", "pc.33", "pc.34", "pc.35", "pc.36", "pc.37","pc.38","pc.39","pc.40"), 
+                   col_types = "cddddddddddddddddddddddddddddddddddddddddddddddddddddddd")
+phenos <- phenosAll %>% 
+  filter(eid %in% indvToInclude$eid) %>% 
+  select(eid, sex, childrenFathered_0, childrenFathered_1, childrenFathered_2, liveBirths_0, liveBirths_1, liveBirths_2, any_complication_0, any_complication_1, any_complication_2, miscarriage_0, miscarriage_1, miscarriage_2, age, pc.1, pc.2, pc.3, pc.4, pc.5, pc.6, pc.7, pc.8, pc.9, pc.10)
+
+phenosCleaned <- phenos %>% 
+  replace(is.na(.), -5) %>% 
+  #Live births
+  mutate(liveBirths = pmax(liveBirths_0, liveBirths_1, liveBirths_2)) %>%
+  #Remove cases where number live births went down over time
+  mutate(liveBirths = if_else(((liveBirths_0 > liveBirths_1 & liveBirths_1 > 0) | (liveBirths_0 > liveBirths_2 & liveBirths_2 > 0) | (liveBirths_1 > liveBirths_2& liveBirths_2 > 0)), -7, liveBirths)) %>% 
+  mutate(liveBirths = if_else(liveBirths > 7, -8, liveBirths)) %>% 
+  
+  #Miscarriage
+  mutate(miscarriage = pmax(miscarriage_0, miscarriage_1,miscarriage_2), any_complication = pmax(any_complication_0, any_complication_1, any_complication_2)) %>%
+  #Add data from any pregnancy complication
+  mutate(miscarriage = if_else(miscarriage == -5, any_complication, miscarriage)) %>% 
+  mutate(miscarriage = if_else(((miscarriage_0 > miscarriage_1 & miscarriage_1 > 0) | (miscarriage_0 > miscarriage_2 & miscarriage_2 > 0) | (miscarriage_1 > miscarriage_2& miscarriage_2 > 0)), -7, miscarriage)) %>% 
+  mutate(miscarriage = if_else(miscarriage > 7, -8, miscarriage)) %>% 
+  
+  #Children fathered
+  mutate(childrenFathered = pmax(childrenFathered_0, childrenFathered_1,childrenFathered_2)) %>% 
+  mutate(childrenFathered = if_else(((childrenFathered_0 > childrenFathered_1 & childrenFathered_1 > 0) | (childrenFathered_0 > childrenFathered_2 & childrenFathered_2 > 0) | (childrenFathered_1 > childrenFathered_2& childrenFathered_2 > 0)), -7, childrenFathered)) %>% 
+  mutate(childrenFathered = if_else(childrenFathered > 7, -8, childrenFathered)) %>% 
+  
+  select(eid, sex, age, childrenFathered, liveBirths, miscarriage, pc.1, pc.2, pc.3, pc.4, pc.5, pc.6, pc.7, pc.8, pc.9, pc.10)
+
+```
+
+#### Pheno Distribution
+```{r phenoDistribution}
+phenosCleaned %>% 
+  filter(liveBirths >= 0) %>% 
+  ggplot(aes(x=liveBirths)) + 
+  geom_bar() +
+  scale_x_continuous(breaks = 0:7,labels=c("0","1","2","3","4","5","6", "7"))
+phenosCleaned %>% 
+  filter(miscarriage >= 0) %>% 
+  ggplot(aes(x=miscarriage)) + 
+  geom_bar() +
+  scale_x_continuous(breaks = 0:7,labels=c("0","1","2","3","4","5","6", "7"))
+phenosCleaned %>% 
+  filter(childrenFathered >= 0) %>% 
+  ggplot(aes(x=childrenFathered)) + 
+  geom_bar() +
+  scale_x_continuous(breaks = 0:7,labels=c("0","1","2","3","4","5","6", "7"))
+```
+
+#### Trios reporting consistency
+```{r reportingConsistency}
+#Parent reporting consistency
+relateds <- read_delim("ukb44165_rel_s488288.dat", delim = " ", col_types = 'ccddd') 
+ggplot(relateds, aes(Kinship, IBS0)) +
+  geom_point()
+parentChild <- relateds %>% 
+  filter(IBS0 < 0.001 & Kinship < 0.3 & Kinship > 0.2) %>% 
+  select(ID1, ID2)
+trioKids <- tibble(eid = c(parentChild$ID1, parentChild$ID2)) %>% 
+  group_by(eid) %>% 
+  summarise(n = n()) %>% 
+  filter(n == 2) %>%
+  left_join((phenosAll %>% select(eid, sex, age)), by = "eid") %>% 
+  left_join(parentChild , by = c("eid" = "ID2")) %>% 
+  left_join(parentChild , by = c("eid" = "ID1")) %>% 
+  pivot_longer(ID1:ID2, names_to = "IDgroup", values_to = "eid2", values_drop_na = T) %>% 
+  distinct() %>% 
+  left_join((phenosAll %>% select(eid, sex, age, liveBirths_0, childrenFathered_0) %>% rename(eid2 = eid, sex2 = sex, age2 = age)), by = "eid2") %>% 
+  filter(age < age2) %>% 
+  group_by(eid) %>% 
+  summarize(momReport = sum(liveBirths_0, na.rm= T), dadReport = sum(childrenFathered_0, na.rm= T)) %>% 
+  filter(momReport >= 0, dadReport >= 0) %>% 
+  mutate(concordant = (momReport == dadReport)) %>% 
+  filter(!concordant)
+```
+
+#### Births vs Miscarriages
+```{r birthsMisscariages}
+#Relationship btwn miscarriages and births
+f_mis_vs_birth <- phenosCleaned %>% 
+  filter(liveBirths >= 0, miscarriage >= 0)
+formulaMB <- as.formula('liveBirths~miscarriage+age+pc.1+pc.2+pc.3+pc.4+pc.5+pc.6+pc.7+pc.8+pc.9+pc.10')
+formulaResidMB <- as.formula('liveBirths~age+pc.1+pc.2+pc.3+pc.4+pc.5+pc.6+pc.7+pc.8+pc.9+pc.10')
+
+f_mis_vs_birthModel <- tidy(lm(formulaMB, data = f_mis_vs_birth))
+#Residual Plot
+resid.f_mis_vs_birth = lm(formulaResidMB, data = f_mis_vs_birth)
+
+f_mis_vs_birth %>% bind_cols(resid = (unname(resid.f_mis_vs_birth$residuals))) %>% 
+  ggplot(aes(x= miscarriage, y = resid)) +
+  geom_jitter()
+#Density plot
+f_mis_vs_birth %>% mutate(binary_miscarriage = as.character(binary_miscarriage)) %>% 
+  ggplot(aes(liveBirths, group = binary_miscarriage, color = binary_miscarriage)) +
+  geom_density(adjust = 3)
+f_mis_vs_birth %>% mutate(miscarriage = as.character(miscarriage)) %>% 
+  ggplot(aes(liveBirths, group = miscarriage, color = miscarriage )) +
+  geom_density(adjust = 4)
+```
+
+## Variant Prep
+```{r Variant_prep}
+#Function to count number of genes within a gene group
+geneGroupCounts <- function(variantTable, phenosTable, columnName) {
+  counts <- phenosTable %>% 
+    select(eid) %>% 
+    left_join(variantTable, by = "eid") %>% 
+    mutate(any_gene = if_else(!is.na(gene), 1, 0)) %>% 
+    mutate(disease_gene = if_else(gene %in% disease$ensembl_gene_id, 1, 0)) %>% 
+    mutate(cellEssential_gene = if_else(gene %in% cellEssential$ensembl_gene_id, 1, 0)) %>% 
+    mutate(noPheno_gene = if_else(gene %in% noPheno$ensembl_gene_id, 1, 0)) %>% 
+    #mutate(repro_gene = if_else(genes %in% repro$ensembl_gene_id, 1, 0)) %>% 
+    group_by(eid) %>% 
+    summarize(!!paste0("disease_", columnName) := sum(disease_gene), !!paste0("cellEssential_", columnName) := sum(cellEssential_gene), !!paste0("noPheno_", columnName) := sum(noPheno_gene), !!paste0("highPLI_", columnName) := sum(disease_gene + cellEssential_gene + noPheno_gene), !!paste0("otherGene_", columnName) := sum(any_gene - (disease_gene + cellEssential_gene + noPheno_gene))) %>% 
+    ungroup() 
+  return(counts)
+}
+```
+
+### CNV Pre-Processing
+```{r CNV_PreProcessing}
+#UKBB ID conversion key
+george_to_martin <- read_tsv("George_to_Martin.txt", col_names = F,col_types = 'cccccccccccc') %>% 
+  select(split.file = X1, eid = X7)
+#VEP genes effected by CNVs - Eugene
+vepGenes <- read_tsv("cnv_vep_parsed.sorted.bed", col_names = F) %>% 
+  select(chr = X1, start = X2, end = X3, type = X4, genes = X5)
+#Locations to loci - Eugene
+loci <- read_tsv("ukbb.merge_key.txt", col_names = F, col_types = 'cccccc') %>% 
+  select(location = X1, locus = X4, split.file = X5, diseaseLocus = X6)
+
+#QC'ed CNVs - Eugene
+cnvs0 <- readRDS("ukbb.batchAll.qcd.03042019.rds") %>% 
+  filter(filter.0.95.wes.support.score==T) %>% 
+  select(chr, start, end, split.file, location, Copy_Number, Gender) %>% 
+  mutate(split.file = str_remove(split.file, "_22002_0_0.sorted.bed.gz")) %>% 
+  mutate(split.file = str_remove(split.file,"^.*\\.")) %>% 
+  left_join(george_to_martin, by = "split.file") %>% 
+  #Filter to individuals selected at pheno step
+  filter(eid %in% phenos$eid) %>% 
+  #Convert location to locus
+  left_join(loci, by = c("location", "split.file")) %>%
+  #Choose deletions or duplications or comment out for both
+  mutate(type = if_else(Copy_Number < 2, "DEL", "DUP")) %>% 
+  left_join(vepGenes, by = c("chr", "start", "end", "type"))
+
+cnvFreq <- cnvs0 %>% 
+  group_by(locus, Copy_Number, type) %>% 
+  #Get allele counts
+  summarize(allele_count = n()) %>% 
+  #Double count for homozygous genotypes
+  mutate(allele_count = if_else(Copy_Number == 0 | Copy_Number == 4, as.integer(allele_count*2), allele_count)) %>% 
+  #Combine het and hom
+  group_by(locus, type)%>% 
+  summarize(allele_count = sum(allele_count)) %>% 
+  ungroup() %>% 
+  mutate(allele_freq = allele_count/length(unique(phenos$eid)))
+
+cnvs <- cnvs0 %>% 
+  #Remove low PLI genes with disease or cell essential pheno to get cleaner control set
+  separate_rows(genes) %>% 
+  rename(gene = genes) %>% 
+  drop_na(gene) %>% 
+  filter(!(gene %in% lowPLIpheno$ensembl_gene_id)) %>% 
+  left_join(cnvFreq, by = c("locus", "type")) 
+
+  # left_join(cnvRareTotals, by = "eid") %>% 
+  # replace(is.na(.), 0) %>% 
+  # mutate(cnvGroup = if_else(tot_any_genes != 0, "otherGene", "none")) %>% 
+  # mutate(cnvGroup = if_else(tot_noPheno_genes != 0, "noPheno", cnvGroup)) %>% 
+  # mutate(cnvGroup = if_else(tot_cellEssential_genes != 0, "cellEssential", cnvGroup)) %>% 
+  # mutate(cnvGroup = if_else(tot_disease_genes != 0, "disease", cnvGroup))
+
+```
+
+### SNV Pre-Processing
+```{r SNV_PreProcessing}
+snvs0 <- read_tsv("counts.ukbb_wes.txt", col_types = 'cccccccccccccccccccc', col_names = c("eid","gt","chr","pos","ref","alt","CADD","MPC","gnomadAF","VQSR","csq","UKBB.AC","AN","UKBB.AF","AP","gene","last_exon","last_intron","num.transcripts","poss.transcripts")) %>% 
+  select(eid, chr, gt, csq, UKBB.AC, UKBB.AF, gene) %>% 
+  #Exclude sex chromosomes
+  filter(chr != "X", chr != "Y") %>% 
+  mutate(eid = str_remove(eid, "_.*")) %>% 
+  filter(eid %in% phenos$eid) 
+
+lofs <- snvs0 %>% 
+  filter(csq == "LOF_HC") %>% 
+  filter(!(gene %in% lowPLIpheno$ensembl_gene_id)) %>% 
+  distinct(eid)
+```
+
+### Variant Counts
+```{r variant_counts}
+#Deletions
+delCounts_singleton <- filter(cnvs, type == "DEL", allele_count == 1) %>% 
+  geneGroupCounts(phenosTable = phenosCleaned, columnName = "delSingleton") 
+delCounts_rare <- filter(cnvs, type == "DEL", allele_freq <= 0.0001) %>% 
+  geneGroupCounts(phenosTable = phenosCleaned, columnName = "delRare") 
+#Duplications
+dupCounts_singleton <- filter(cnvs, type == "DUP", allele_count == 1) %>% 
+  geneGroupCounts(phenosTable = phenosCleaned, columnName = "dupSingleton") 
+dupCounts_rare <- filter(cnvs, type == "DUP", allele_freq <= 0.0001) %>% 
+  geneGroupCounts(phenosTable = phenosCleaned, columnName = "dupRare") 
+#SNV LOFs
+lofCounts_singleton <- filter(lofs, UKBB.AC == 1) %>% 
+  geneGroupCounts(phenosTable = phenosCleaned, columnName = "lofSingleton") 
+lofCounts_rare <- filter(lofs, UKBB.AF <= 0.0001) %>% 
+  geneGroupCounts(phenosTable = phenosCleaned, columnName = "lofRare") 
+
+#Full table
+variantCounts <- phenosCleaned %>% 
+  left_join(delCounts_singleton, by = "eid") %>% 
+  left_join(delCounts_rare, by = "eid") %>% 
+  left_join(dupCounts_singleton, by = "eid") %>% 
+  left_join(dupCounts_rare, by = "eid") %>% 
+  left_join(lofCounts_singleton, by = "eid") %>% 
+  left_join(lofCounts_rare, by = "eid")
+
+```
+
+#### CNV Plots
+```{r CNV_Plots, echo=FALSE, fig.height=5, fig.width=8, warning=FALSE, dpi = 400}
+
+cnvFreq %>% filter(type == "DEL") %>% 
+  ggplot(aes(x = allele_freq)) +
+  geom_histogram(bins = 5) +
+  scale_y_log10() +
+  scale_x_log10()
+cnvFreq %>% filter(type == "DUP") %>% 
+  ggplot(aes(x = allele_freq)) +
+  geom_histogram(bins = 5) +
+  scale_y_log10() +
+  scale_x_log10()
+
+#Distribution within categories
+distributions <- function(df) {
+  df <- as.data.frame(df)
+  upset <- as.data.frame(df) %>% 
+    mutate(noPhenoU = if_else(noPheno != 0 , 1, 0)) %>% 
+    mutate(cellEssentialU = if_else(cellEssential != 0, 1, 0)) %>%
+    mutate(diseaseU = if_else(disease != 0, 1, 0)) %>% 
+    mutate(otherU = if_else(other != 0 & noPheno == 0 & cellEssential == 0 & disease == 0, 1, 0)) %>% 
+    as.data.frame() %>% 
+    upset(sets = c("otherU","noPhenoU", "cellEssentialU",  "diseaseU"), sets.bar.color = "#56B4E9", order.by = "freq", text.scale = 1.5)
+  dist_cellEssential <- df %>% 
+    ggplot(aes(x=cellEssential)) + 
+    geom_bar() +
+    scale_y_log10(breaks = c(10,1000, 100000), labels=c("10", "1000", "100000")) +
+    scale_x_continuous(breaks = 0:6,labels=c("0","1","2","3","4","5","6+")) 
+  dist_disease <- df %>% 
+    ggplot(aes(x=disease)) + 
+    geom_bar() +
+    scale_y_log10(breaks = c(10,1000, 100000), labels=c("10", "1000", "100000")) +
+    scale_x_continuous(breaks = 0:6,labels=c("0","1","2","3","4","5","6+")) 
+  dist_noPheno <- df %>% 
+    ggplot(aes(x=noPheno)) + 
+    geom_bar() +
+    scale_y_log10(breaks = c(10,1000, 100000), labels=c("10", "1000", "100000")) +
+    scale_x_continuous(breaks = 0:6,labels=c("0","1","2","3","4","5","6+")) 
+  dist_other <- df %>% 
+    ggplot(aes(x=other)) + 
+    geom_bar() +
+    scale_y_log10(breaks = c(10,1000, 100000), labels=c("10", "1000", "100000")) +
+    scale_x_continuous(breaks = 0:6,labels=c("0","1","2","3","4","5","6+")) 
+  distros <- dist_cellEssential + dist_disease + dist_noPheno + dist_other
+  return(list(upset, distros))
+}
+singletonDel_Distro <- variantCounts %>% 
+  mutate(cellEssential = if_else(cellEssential_delSingleton > 6, 6, cellEssential_delSingleton)) %>% 
+  mutate(disease = if_else(disease_delSingleton > 6, 6, disease_delSingleton)) %>% 
+  mutate(noPheno = if_else(noPheno_delSingleton > 6, 6, noPheno_delSingleton)) %>% 
+  mutate(other = if_else(otherGene_delSingleton > 6, 6, otherGene_delSingleton)) %>% 
+  distributions()
+singletonDel_Distro[[1]]
+singletonDel_Distro[[2]]
+
+rareDel_Distro <- variantCounts %>% 
+  mutate(cellEssential = if_else(cellEssential_delRare > 6, 6, cellEssential_delRare)) %>% 
+  mutate(disease = if_else(disease_delRare > 6, 6, disease_delRare)) %>% 
+  mutate(noPheno = if_else(noPheno_delRare > 6, 6, noPheno_delRare)) %>% 
+  mutate(other = if_else(otherGene_delRare > 6, 6, otherGene_delRare)) %>% 
+  distributions()
+rareDel_Distro[[1]]
+rareDel_Distro[[2]]
+
+singletonDup_Distro <- variantCounts %>% 
+  mutate(cellEssential = if_else(cellEssential_dupSingleton > 6, 6, cellEssential_dupSingleton)) %>% 
+  mutate(disease = if_else(disease_dupSingleton > 6, 6, disease_dupSingleton)) %>% 
+  mutate(noPheno = if_else(noPheno_dupSingleton > 6, 6, noPheno_dupSingleton)) %>% 
+  mutate(other = if_else(otherGene_dupSingleton > 6, 6, otherGene_dupSingleton)) %>% 
+  distributions()
+singletonDup_Distro[[1]]
+singletonDup_Distro[[2]]
+
+rareDup_Distro <- variantCounts %>% 
+  mutate(cellEssential = if_else(cellEssential_dupRare > 6, 6, cellEssential_dupRare)) %>% 
+  mutate(disease = if_else(disease_dupRare > 6, 6, disease_dupRare)) %>% 
+  mutate(noPheno = if_else(noPheno_dupRare > 6, 6, noPheno_dupRare)) %>% 
+  mutate(other = if_else(otherGene_dupRare > 6, 6, otherGene_dupRare)) %>% 
+  distributions()
+rareDup_Distro[[1]]
+rareDup_Distro[[2]]
+
+singletonlof_Distro <- variantCounts %>% 
+  mutate(cellEssential = if_else(cellEssential_lofSingleton > 6, 6, cellEssential_lofSingleton)) %>% 
+  mutate(disease = if_else(disease_lofSingleton > 6, 6, disease_lofSingleton)) %>% 
+  mutate(noPheno = if_else(noPheno_lofSingleton > 6, 6, noPheno_lofSingleton)) %>% 
+  mutate(other = if_else(otherGene_lofSingleton > 6, 6, otherGene_lofSingleton)) %>% 
+  distributions()
+singletonlof_Distro[[1]]
+singletonlof_Distro[[2]]
+
+rarelof_Distro <- variantCounts %>% 
+  mutate(cellEssential = if_else(cellEssential_lofRare > 6, 6, cellEssential_lofRare)) %>% 
+  mutate(disease = if_else(disease_lofRare > 6, 6, disease_lofRare)) %>% 
+  mutate(noPheno = if_else(noPheno_lofRare > 6, 6, noPheno_lofRare)) %>% 
+  mutate(other = if_else(otherGene_lofRare > 6, 6, otherGene_lofRare)) %>% 
+  distributions()
+rarelof_Distro[[1]]
+rarelof_Distro[[2]]
+
+```
+
+### Genelist modeling
+```{r Genelist_modeling, echo=FALSE, fig.height=5, fig.width=6, warning=FALSE}
+geneFreq <- cnvs %>% 
+  filter(allele_count == 1) %>% 
+  filter(type == "DEL") %>% 
+  group_by(gene) %>% 
+  summarize(n_cnvs = n()) %>% 
+  rename(ensembl_gene_id = gene) %>% 
+  drop_na() 
+
+geneList_cnvs <- geneList %>% 
+  left_join(geneFreq, by = "ensembl_gene_id") %>% 
+  mutate(n_cnvs = replace_na(n_cnvs, 0))
+
+formulaGenes <- as.formula('n_cnvs~n_probes+gene_length')
+lmGenes <- lm(formulaGenes , data = geneList_cnvs)
+residGenes <- tidy(residuals(lm(formulaGenes , data = geneList_cnvs), type = 'pearson')) %>% 
+  bind_cols(geneList_cnvs) %>% 
+  rename(resid = x) %>% 
+  mutate(z_resid = scale(resid, center = TRUE, scale = TRUE)) %>% 
+  filter(geneGroup != "lowPLIpheno") 
+
+my_comparisons <- list(c("base", "disease"), c("base", "noPheno"), c("base", "cellEssential") )
+
+ggplot(residGenes, aes(x = geneGroup, y = z_resid, group = geneGroup)) +
+  geom_boxplot() +
+  ylab("< -- Missing                CNV Residual Z-score                 Excess -- >") +
+  stat_compare_means(comparisons = my_comparisons)
+
+```
+
+
+## Association Tests
+### Linear Models
+```{r Linear_models_combined, fig.height=8, fig.width=16, message=FALSE, warning=FALSE}
+
+plot_lm <- function(phenoTable, phenoColumn, geneGroups, columnNames) {
+  #Construct formula and run model
+  df <- tibble()
+  for (group in geneGroups) {
+    
+    del_group <- paste0(group, "_", columnNames[1])
+    dup_group <- paste0(group, "_", columnNames[2])
+    lof_group <- paste0(group, "_", columnNames[3])
+
+    #Filter out ppl with cnvs in other groups from control set
+    formula <- as.formula(paste0(phenoColumn,'~',del_group,'+',dup_group,'+',lof_group,'+','+age+pc.1+pc.2+pc.3+pc.4+pc.5+pc.6+pc.7+pc.8+pc.9+pc.10'))
+    tidy_lm <- tidy(lm(formula, data = phenoTable))[2:4,]
+    df <- df %>% bind_rows(tidy_lm)
+  }
+  #Plot together
+  df2 <- df %>% 
+    mutate(group = str_remove(term, "_.*")) %>% 
+    mutate(variant = str_remove(term, ".*_")) %>% 
+    mutate(p.format = paste0("p = ",format.pval(p.value, digits = 2, eps = 1e-100)))
+  df2$group <- factor(df2$group, levels = geneGroups)
+  df2$variant <- factor(df2$variant, levels = columnNames)
+  plot <- ggplot(df2, aes(x = group, y = estimate, colour = variant, label = p.format, group = interaction(group, variant))) +
+    geom_hline(yintercept = 0, colour = "grey") +
+    geom_point(position = position_dodge(0.75), size = 3) +
+    geom_errorbar(aes(ymin=estimate-(std.error*1.96), ymax=estimate+(std.error*1.96)), width=.2, position = position_dodge(0.75), size = 1) +
+    
+    geom_text(colour = "black", size = 5, position = position_dodge(0.75), vjust = -0.75) +
+    ylim(-0.4,0.4) +
+    ylab(paste0("Estimate ", phenoColumn)) +
+    coord_flip() +
+    theme_minimal(base_size = 18)
+  return(plot)
+}
+geneGroups5 <- c("highPLI", "cellEssential", "disease", "noPheno", "otherGene")
+columnNamesSingleton <- c("lofSingleton", "dupSingleton", "delSingleton")
+columnNamesRare <- c("lofRare", "dupRare", "delRare")
+
+variantCountsLM <- variantCounts %>% 
+  mutate(otherGene_delSingleton = ifelse(highPLI_delSingleton >= 1, 0, otherGene_delSingleton)) %>% 
+  mutate(otherGene_dupSingleton = ifelse(highPLI_dupSingleton >= 1, 0, otherGene_dupSingleton)) %>% 
+  mutate(otherGene_lofSingleton = ifelse(highPLI_lofSingleton >= 1, 0, otherGene_lofSingleton)) %>% 
+  mutate(otherGene_delRare = ifelse(highPLI_delRare >= 1, 0, otherGene_delRare)) %>% 
+  mutate(otherGene_dupRare = ifelse(highPLI_dupRare >= 1, 0, otherGene_dupRare)) %>% 
+  mutate(otherGene_lofRare = ifelse(highPLI_lofRare >= 1, 0, otherGene_lofRare)) 
+
+p_Singleton_births <- filter(variantCountsLM, liveBirths >= 0) %>% 
+  plot_lm(phenoColumn = "liveBirths", geneGroups = geneGroups5, columnNames = columnNamesSingleton)
+p_Singleton_misc <- filter(variantCountsLM, miscarriage >= 0) %>% 
+  plot_lm(phenoColumn = "miscarriage", geneGroups = geneGroups5, columnNames = columnNamesSingleton)
+p_Singleton_fathered <- filter(variantCountsLM, childrenFathered >= 0) %>% 
+  plot_lm(phenoColumn = "childrenFathered", geneGroups = geneGroups5, columnNames = columnNamesSingleton)
+
+p_Singleton_births + p_Singleton_misc + p_Singleton_fathered + plot_layout(guides = 'collect')
+
+p_Rare_births <- filter(variantCountsLM, liveBirths >= 0) %>% 
+  plot_lm(phenoColumn = "liveBirths", geneGroups = geneGroups5, columnNames = columnNamesRare)
+p_Rare_misc <- filter(variantCountsLM, miscarriage >= 0) %>% 
+  plot_lm(phenoColumn = "miscarriage", geneGroups = geneGroups5, columnNames = columnNamesRare)
+p_Rare_fathered <- filter(variantCountsLM, childrenFathered >= 0) %>% 
+  plot_lm(phenoColumn = "childrenFathered", geneGroups = geneGroups5, columnNames = columnNamesRare)
+
+p_Rare_births + p_Rare_misc + p_Rare_fathered + plot_layout(guides = 'collect')
+
+
+```
+
+
+## Removed Code
+```{r old Plots}
+
+# lm_f_births <- f_births %>% 
+#   mutate(cellEssential = if_else(singleton_cnvGroup == "cellEssential", 1,0)) %>% 
+#   mutate(disease = if_else(singleton_cnvGroup == "disease", 1,0)) %>% 
+#   mutate(noPheno = if_else(singleton_cnvGroup == "noPheno", 1,0)) %>% 
+#   mutate(otherGene = if_else(singleton_cnvGroup == "otherGene", 1,0)) %>% 
+#   #mutate(repro = if_else(singleton_cnvGroup == "repro", 1,0)) %>% 
+#   mutate(highPLI = if_else(singleton_cnvGroup %in% c("cellEssential", "disease", "noPheno"), 1,0)) 
+#     
+#     #Edit table based on group
+#     if (group == "otherGene") {
+#       highPLIdel <- paste0("highPLI_", columnNames[1])
+#       highPLIdup <- paste0("highPLI_", columnNames[2])
+#       highPLIlof <- paste0("highPLI_", columnNames[3])
+#       phenoTable2 <- filter(phenoTable, !(del_group >= 1 & highPLIdel >= 1)) %>% 
+#         filter(phenoTable, !(dup_group >= 1 & highPLIdup >= 1)) %>% 
+#         filter(phenoTable, !(lof_group >= 1 & highPLIlof >= 1))
+#     }
+#     else {
+#       phenoTable2 <- phenoTable
+#     }
+# 
+# 
+# plot_lm <- function(phenoTable, phenoColumn, geneGroup) {
+#   #Construct formula and run model
+#   formula <- as.formula(paste0(phenoColumn, '~', geneGroup, '+age+pc.1+pc.2+pc.3+pc.4+pc.5+pc.6+pc.7+pc.8+pc.9+pc.10'))
+#   tidy_lm <- tidy(lm(formula, data = phenoTable))
+#   #print(tidy_lm[2,])
+#   #Plot
+#   tidy_lm %>% filter(term != "(Intercept)") %>% 
+#     ggplot(aes(x = term, y = estimate)) +
+#     geom_point() +
+#     geom_errorbar(aes(ymin=estimate-(std.error*1.96), ymax=estimate+(std.error*1.96)), width=.1) +
+#     ylab(paste0("Estimate ", phenoColumn)) +
+#     coord_flip() 
+# }
+# print_lm <- function(phenoTable, phenoColumn, geneGroup) {
+#   #Construct formula and run model
+#   formula <- as.formula(paste0(phenoColumn, '~', geneGroup, '+age+pc.1+pc.2+pc.3+pc.4+pc.5+pc.6+pc.7+pc.8+pc.9+pc.10'))
+#   lm <- lm(formula, data = phenoTable)
+#   tidy_lm <- tidy(lm(formula, data = phenoTable))
+#   return(lm)
+# }
+#Female live births
+#plot_lm(phenoTable = lm_f_births, phenoColumn = "liveBirths", geneGroup = "cellEssential")
+#plot_lm(phenoTable = lm_f_births, phenoColumn = "liveBirths", geneGroup = "disease")
+#plot_lm(phenoTable = lm_f_births, phenoColumn = "liveBirths", geneGroup = "noPheno")
+#plot_lm(phenoTable = lm_f_births, phenoColumn = "liveBirths", geneGroup = "highPLI")
+#Female miscarriages
+#plot_lm(phenoTable = lm_f_miscarriages, phenoColumn = "miscarriage", geneGroup = "cellEssential")
+#plot_lm(phenoTable = lm_f_miscarriages, phenoColumn = "miscarriage", geneGroup = "disease")
+#plot_lm(phenoTable = lm_f_miscarriages, phenoColumn = "miscarriage", geneGroup = "noPheno")
+#plot_lm(phenoTable = lm_f_miscarriages, phenoColumn = "miscarriage", geneGroup = "highPLI")
+#Male children fathered
+#plot_lm(phenoTable = lm_m_births, phenoColumn = "childrenFathered", geneGroup = "cellEssential")
+#plot_lm(phenoTable = lm_m_births, phenoColumn = "childrenFathered", geneGroup = "disease")
+# plot_lm(phenoTable = lm_m_births, phenoColumn = "childrenFathered", geneGroup = "noPheno")
+# 
+#   #Use to find cases where number changes
+#   #filter((liveBirths_0 != liveBirths_1 & liveBirths_1 > 0 & liveBirths_0 > 0) |(liveBirths_0 != liveBirths_2 & liveBirths_2 > 0 & liveBirths_0 > 0) |(liveBirths_1 != liveBirths_2& liveBirths_2 > 0 & liveBirths_1 > 0))
+# 
+# 
+# cnvsTest <- readRDS("ukbb.batchAll.qcd.03042019.rds") %>% 
+#   filter(filter.0.95.wes.support.score==T) %>% 
+#   select(chr, start, end, split.file, location, Copy_Number, Gender) %>% 
+#   mutate(split.file = str_remove(split.file, "_22002_0_0.sorted.bed.gz")) %>% 
+#   mutate(split.file = str_remove(split.file,"^.*\\.")) %>% 
+#   left_join(george_to_martin, by = "split.file") %>% 
+#   #Filter to individuals selected at pheno step
+#   filter(eid %in% phenos$eid) %>% 
+#   #Choose deletions or duplications or comment out for both
+#   filter(Copy_Number < 2) %>% 
+#   left_join(vepGenes, by = c("chr", "start", "end")) %>% 
+#   #Remove low PLI genes with disease or cell essential pheno to get cleaner control set
+#   separate_rows(genes) %>% 
+#   filter(!(genes %in% lowPLIpheno$ensembl_gene_id)) %>% 
+#   mutate(disease_gene = if_else(genes %in% disease$ensembl_gene_id, 1, 0)) %>% 
+#   mutate(cellEssential_gene = if_else(genes %in% cellEssential$ensembl_gene_id, 1, 0)) %>% 
+#   mutate(noPheno_gene = if_else(genes %in% noPheno$ensembl_gene_id, 1, 0)) %>% 
+#   filter(cellEssential_gene == 1) 
+# 
+# 
+# table(cnvsTest$genes)
+# 
+# cnvsTest2 <- cnvsTest
+# <!-- ## Hemizygous Gene Analysis -->
+# <!-- ### Prep -->
+# <!-- ```{r hemizygous_prep} -->
+# <!-- #Function to count number of genes within a gene group -->
+# <!-- geneGroupCountsHEMI <- function(variantTable, phenosTable, columnName) { -->
+# <!--   counts <- phenosTable %>%  -->
+# <!--     select(eid) %>%  -->
+# <!--     left_join(variantTable, by = "eid") %>%  -->
+# <!--     mutate(any_gene = if_else(!is.na(gene), 1, 0)) %>%  -->
+# <!--     mutate(hemi_all_gene = if_else(gene %in% hemi_all$ensembl_gene_id, 1, 0)) %>%  -->
+# <!--     mutate(hemi_brain_gene = if_else(gene %in% hemi_brain$ensembl_gene_id, 1, 0)) %>%  -->
+# <!--     mutate(hemi_brain_lof_gene = if_else(gene %in% hemi_brain_lof$ensembl_gene_id, 1, 0)) %>%  -->
+# <!--     group_by(eid) %>%  -->
+# <!--     summarize(!!paste0("hemi_all_", columnName) := sum(hemi_all_gene), !!paste0("hemi_brain_", columnName) := sum(hemi_brain_gene), !!paste0("hemi_brain_lof_", columnName) := sum(hemi_brain_lof_gene), !!paste0("otherGene_", columnName) := sum(any_gene - (hemi_all_gene))) %>%  -->
+# <!--     ungroup()  -->
+# <!--   return(counts) -->
+# <!-- } -->
+# 
+# <!-- #Three levels of specificity for hemizygous gene lists -->
+# <!-- hemi_all <- read_tsv("hemizygous/hemizygous_DD_genes.ENSG.txt", col_types = 'c', col_names = 'ensembl_gene_id') -->
+# <!-- hemi_brain <- read_tsv("hemizygous/hemizygous_DD_genes_affecting_brain.ENSG.txt", col_types = 'c', col_names = 'ensembl_gene_id') -->
+# <!-- hemi_brain_lof <- read_tsv("hemizygous/hemizygous_DD_genes_affecting_brain_with_LoF_mechanism.ENSG.txt", col_types = 'c', col_names = 'ensembl_gene_id') -->
+# 
+# <!-- #Set up table with variant counts -->
+# <!-- #Deletions -->
+# <!-- delCounts_singletonHEMI <- filter(cnvs, type == "DEL") %>%  -->
+# <!--   geneGroupCountsHEMI(phenosTable = phenosCleaned, columnName = "delSingleton")  -->
+# <!-- delCounts_rareHEMI <- filter(cnvs, type == "DEL", allele_freq <= 0.0001) %>%  -->
+# <!--   geneGroupCountsHEMI(phenosTable = phenosCleaned, columnName = "delRare")  -->
+# <!-- #Duplications -->
+# <!-- dupCounts_singletonHEMI <- filter(cnvs, type == "DUP", allele_count == 1) %>%  -->
+# <!--   geneGroupCountsHEMI(phenosTable = phenosCleaned, columnName = "dupSingleton")  -->
+# <!-- dupCounts_rareHEMI <- filter(cnvs, type == "DUP", allele_freq <= 0.0001) %>%  -->
+# <!--   geneGroupCountsHEMI(phenosTable = phenosCleaned, columnName = "dupRare")  -->
+# <!-- #SNV LOFs -->
+# <!-- lofCounts_singletonHEMI <- filter(lofs, UKBB.AC == 1) %>%  -->
+# <!--   geneGroupCountsHEMI(phenosTable = phenosCleaned, columnName = "lofSingleton")  -->
+# <!-- lofCounts_rareHEMI <- filter(lofs, UKBB.AF <= 0.0001) %>%  -->
+# <!--   geneGroupCountsHEMI(phenosTable = phenosCleaned, columnName = "lofRare")  -->
+# 
+# <!-- #Full table -->
+# <!-- variantCountsHEMI <- phenosCleaned %>%  -->
+# <!--   left_join(lofCounts_singletonHEMI, by = "eid") %>%  -->
+# <!--   left_join(lofCounts_rareHEMI, by = "eid")  -->
+# <!-- ``` -->
+# 
+# <!-- ### Analysis -->
+# <!-- ```{r hemizygous_analysis} -->
+# 
+# <!-- variantCountHEMI <- variantCounts %>%  -->
+# <!--   #Only females -->
+# <!--   filter(sex == 0)  -->
+# 
+# <!-- columnNamesSingleton <- c("lofSingleton", "dupSingleton", "delSingleton") -->
+# <!-- columnNamesRare <- c("lofRare", "dupRare", "delRare") -->
+# <!-- ``` -->
+```
+
+
+
+

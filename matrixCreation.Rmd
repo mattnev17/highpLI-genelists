@@ -1,0 +1,1130 @@
+---
+title: "matrixCreation"
+output: html_document
+html_document: default
+pdf_document: default
+---
+
+# Gene Group Enrichments
+
+Load neccessary libraries.
+```{r libraries, include=FALSE, message=FALSE, warning=FALSE}
+
+##Libraries
+library(tidyverse)
+library(matrixStats)
+library(UpSetR)
+library(reshape2)
+library(data.table)
+library(RColorBrewer)
+library(rateratio.test)
+library(ggpubr)
+library(patchwork)
+
+#color palette 
+myColorsother <- c('#999999','#56B4E9', "#66CC99", "#E69F00")
+myColors <- c('#56B4E9',"#66CC99", "black")
+myColorsCombo <- c('#56B4E9',"#66CC99", "#E69F00")
+```
+
+## Custom Functions
+* convertGeneToHGNC() #Convert gene names to HGNC ids
+* get_upper_tri() #Get upper triangle of a correlation matrix
+
+```{r functions, message=FALSE, warning=FALSE, include=FALSE}
+#Convert gene names to HGNC ids
+convertGeneToHGNC <- function(table, geneCol, ensemblCol = "None", trimToMatched = T, hgncTable = hgncIDs) {
+  #Matches current symbol
+  tableCurrent <- table %>% 
+    mutate_(symbol = geneCol) %>% 
+    filter(symbol %in% hgncTable$symbol) %>% 
+    left_join(hgncTable, by = "symbol") %>% 
+    select(-symbol, -old_symbol,-ensembl_gene_id, -alias_symbol, -entrez_gene_id) %>% 
+    distinct()
+  print(paste0(length(tableCurrent$hgnc_id), " entries matched a current hgnc symbol"))
+  #Then matches old symbol
+  tableOld <- table %>% 
+    mutate_(old_symbol = geneCol) %>% 
+    filter(old_symbol %in% hgncTable$old_symbol & !old_symbol %in% hgncTable$symbol) %>% 
+    left_join(hgncTable, by = "old_symbol") %>% 
+    select(-symbol, -old_symbol, -ensembl_gene_id, -alias_symbol, -entrez_gene_id) %>% 
+    distinct()
+  print(paste0(length(tableOld$hgnc_id), " entries matched an old hgnc symbol")) 
+  #Then matches aliases
+  tableAlias <- table %>% 
+    mutate_(alias_symbol = geneCol) %>% 
+    filter(alias_symbol %in% hgncTable$alias_symbol & !alias_symbol %in% hgncTable$symbol & !alias_symbol %in% hgncTable$old_symbol) %>% 
+    left_join(hgncTable, by = "alias_symbol") %>% 
+    select(-symbol, -old_symbol, -ensembl_gene_id, -alias_symbol, -entrez_gene_id) %>% 
+    distinct()
+  print(paste0(length(tableAlias$hgnc_id), " entries matched an alias symbol")) 
+  
+  #If matching to ensembl gene id
+  if (ensemblCol != "None") {
+    tableENG <- table %>% 
+      mutate_(symbolInput = geneCol) %>% 
+      mutate_(ensembl_gene_id = ensemblCol) %>% 
+      filter(ensembl_gene_id %in% hgncTable$ensembl_gene_id & !symbolInput %in% hgncTable$alias_symbol & 
+               !symbolInput %in% hgncTable$symbol & !symbolInput %in% hgncTable$old_symbol) %>% 
+      left_join(hgncTable, by = "ensembl_gene_id") %>% 
+      select(-symbolInput, -symbol, -old_symbol,-ensembl_gene_id, -alias_symbol, -entrez_gene_id) %>% 
+      distinct()
+    print(paste0(length(tableENG$hgnc_id), " entries matched an ensembl gene ID")) 
+    #Then counts non-matches
+    tableNoMatch <- table %>% 
+      mutate_(symbol = geneCol) %>% 
+      mutate_(ensembl_gene_id = ensemblCol) %>% 
+      filter(!symbol %in% hgncTable$symbol & !symbol %in% hgncTable$old_symbol & !symbol %in% hgncTable$alias_symbol &
+               !ensembl_gene_id %in% hgncTable$ensembl_gene_id) %>% 
+      select(-symbol, -ensembl_gene_id) %>% 
+      distinct()
+    print(paste0(dim(tableNoMatch)[1], " entries did NOT match a protein coding gene symbol")) 
+    if(trimToMatched) {
+      tableJoined <- bind_rows(tableCurrent, tableOld, tableAlias, tableENG) 
+      print("Non-matches discarded")
+    }
+    else {
+      tableJoined <- bind_rows(tableCurrent, tableOld, tableAlias, tableENG, tableNoMatch)
+      print("Non-matches retained")
+    }
+  }
+  #Else not using ensembl IDs
+  else {
+    tableNoMatch <- table %>% 
+      mutate_(symbol = geneCol) %>% 
+      filter(!symbol %in% hgncTable$symbol & !symbol %in% hgncTable$old_symbol & !symbol %in% hgncTable$alias_symbol) %>% 
+      select(-symbol) %>% 
+      distinct()
+    print(paste0(dim(tableNoMatch)[1], " entries did NOT match a protein coding gene symbol")) 
+    if(trimToMatched) {
+      tableJoined <- bind_rows(tableCurrent, tableOld, tableAlias)
+      print("Non-matches discarded")
+    }
+    else {
+      tableJoined <- bind_rows(tableCurrent, tableOld, tableAlias, tableNoMatch)
+      print("Non-matches retained")
+    }
+  }
+  return(tableJoined)
+}
+
+# Get upper triangle of the correlation matrix
+get_upper_tri <- function(corExplorer){
+  corExplorer[lower.tri(corExplorer)]<- NA
+  return(corExplorer)
+}
+
+reorder_cormat <- function(cormat){
+# Use correlation between variables as distance
+dd <- as.dist((1-cormat)/2)
+hc <- hclust(dd)
+cormat <-cormat[rev(hc$order), rev(hc$order)]
+}
+
+```
+
+ddd19 functions
+```{r}
+#get bootstrap CIs on all mean ratios
+bootRatioCI <- function(x,y,nsim = 100){
+  x <- x[!is.na(x)]
+  y <- y[!is.na(y)]
+  simx <- replicate(nsim,mean(sample(x, size = length(x),replace = T)))
+  simy <- replicate(nsim,mean(sample(y, size = length(y),replace = T)))
+  cis <- quantile(simx/simy,probs = c(0.025,0.975),na.rm = T)
+  return(cis)
+}
+
+getCIs <- function(mycol,mygroup, df, nsim = 100){
+  otherv = df %>% 
+    filter(geneGroup == "other") %>% 
+    select(mycol) 
+  groupv = df %>% 
+    filter(geneGroup == mygroup) %>% 
+    select(mycol) 
+  groupCI <- bootRatioCI(groupv,otherv, nsim = nsim)
+  val1 <- as.numeric(groupCI)[1]
+  val2 <- as.numeric(groupCI)[2]
+  return(list(val1,val2))
+}
+
+getRandomEnr <- function(otherV, combinedV, groupAV){
+  randomA <- sample.int(length(combinedV), length(groupAV))
+  randomB <- setdiff(1:length(combinedV), randomA)
+  sim_other <- mean(sample(otherV, size = length(otherV),replace = T))
+  randomEnr <- (mean(randomA) - mean(randomB))/sim_other
+  return(randomEnr)
+}
+
+getSig <- function(feat, groupA, groupB, other = "other", df, nsim = 10000) {
+  #Get vectors for feature of interest
+  other_Vec = df %>% 
+    filter(geneGroup == other) %>% 
+    select(feat)
+  other_Vec <- other_Vec[!is.na(other_Vec)]
+  groupA_Vec = df %>% 
+    filter(geneGroup == groupA) %>% 
+    select(feat)
+  groupA_Vec <- groupA_Vec[!is.na(groupA_Vec)]
+  groupB_Vec = df %>% 
+    filter(geneGroup == groupB) %>% 
+    select(feat)
+  groupB_Vec <- groupB_Vec[!is.na(groupB_Vec)]
+  combined_Vec <- c(groupA_Vec, groupB_Vec)
+  
+  #Simulate enrichments for random combination of A and B vectors, with sampling from the other
+  sim_enr_dif <- replicate(nsim, getRandomEnr(other_Vec, combined_Vec, groupA_Vec))
+  obs_enr_dif <- (mean(groupA_Vec) - mean(groupB_Vec))/mean(other_Vec)
+  #Get min of count above and below obs
+  minCount <- min(length(sim_enr_dif[sim_enr_dif<=obs_enr_dif]), length(sim_enr_dif[sim_enr_dif>=obs_enr_dif]))
+  pVal <- ifelse(minCount == 0, 1/nsim, minCount/nsim)
+  return(pVal)
+}
+
+```
+## Data prep
+
+Load in data and convert datasets with gene names to hgnc IDs for consistency/compatibility
+```{r dataLoad, message=FALSE, warning=FALSE}
+#HGNC IDs for all protein coding genes
+hgncIDs <- read_tsv("hgncIDs2.txt", col_types = 'ccccic', skip = 1, 
+                    col_names = c('hgnc_id', 'symbol', 'alias_symbol','old_symbol', 'entrez_gene_id', 'ensembl_gene_id')) %>% 
+  mutate(hgnc_id = str_remove(hgnc_id, "HGNC:"))
+
+#GnomadGenes
+gnomADGenes <- read_tsv("gnomad.constraint.txt.gz") %>% 
+  select(gene, pLI, gene_id, exac_pLI, oe_lof_upper, syn_z, mis_z, cds_length, num_coding_exons, gene_length, obs_syn, obs_lof) %>% 
+  mutate(lof_synRatio = obs_lof/obs_syn) %>% 
+  select(-obs_syn, -obs_lof) %>% 
+  convertGeneToHGNC(geneCol = "gene", ensemblCol = "gene_id") %>% 
+  arrange(hgnc_id, desc(cds_length)) %>% 
+  distinct(hgnc_id, .keep_all = T)
+
+#Gene Discovery paper df
+load("../GeneDiscovery/output/Data/universe_df.rda")
+geneDiscovery <- universe_df %>% 
+  mutate(hgnc_id = str_remove(hgnc_id, "HGNC:")) %>% 
+  select(hgnc_id, omimGD = omim, human_lethal = human_lethal_B, any_reg_constraint, 
+         lethal_hom_mouse = lethal_mouse, lethal_het_mouse) %>% 
+  replace(is.na(.), 0) %>% 
+  replace(.=="N", 0) %>% 
+  replace(.=="Y", 1) %>% 
+  mutate_all(as.numeric) %>% 
+  mutate(hgnc_id = as.character(hgnc_id))
+
+#Kaitlin and Joanna's gene features
+ddd19features <- read_tsv("gene_features.tab") 
+
+ddd19 <- read_tsv("extended_denovoWEST_results.tab") %>% 
+  select(symbol, s_het, hgnc_id = num_hgnc_id ) %>% 
+  mutate(hgnc_id = as.character(hgnc_id)) %>% 
+  distinct() %>% 
+  left_join(ddd19features, by = 'symbol') %>% 
+  arrange(hgnc_id, desc(pLI),  PPI_BTWN) %>% 
+  distinct(hgnc_id, .keep_all = T) %>% 
+  select(-symbol, -pLI, -glen)
+
+
+#Get DD2GP genes
+ddg2p <- read_csv("DDG2P_12_11_2019.csv") %>% 
+  rename(hgnc_id = `hgnc id`)
+develGenes <- ddg2p %>% 
+  filter(`DDD category` %in% c("probable","confirmed","both DD and IF")) %>% 
+  distinct(`hgnc_id`)
+ddg2p_mono <- ddg2p %>% 
+  filter(`allelic requirement` %in% c("monoallelic","x-linked dominant","hemizygous","imprinted", "biallelic,monoallelic","mitochondrial") &
+                       `DDD category` %in% c("probable","confirmed","both DD and IF")) %>% 
+  distinct(`hgnc_id`)
+ddg2p_recessive <- ddg2p %>% 
+  filter(`allelic requirement` %in% c("biallelic") &
+                       `DDD category` %in% c("probable","confirmed","both DD and IF")) %>% 
+  distinct(`hgnc_id`)
+
+
+#Get OMIM genes
+omimGenes <- read_tsv("/Volumes/ddd0/mn7/morbidmap_2019_10_08.txt", skip = 4, comment = '#', col_types = 'ccic',
+                      col_names = c("Pheno", "Gene", "MIM_Number", "Cyto_Location")) %>% 
+  select(Pheno, Gene) %>% 
+  drop_na() %>% 
+  mutate(Gene = gsub(",.*", "", Gene)) %>% 
+  mutate(omim_nondisease = ifelse(grepl("\\[", Pheno), T,F)) %>% 
+  mutate(omim_complex = ifelse(grepl("\\{", Pheno), T,F)) %>% 
+  mutate(omim_provisional = ifelse(grepl("\\?", Pheno), T,F))
+#saveRDS(omimGenes, "omimGenes.rds")
+#omimGenes = readRDS("omimGenes.rds")
+omimConverted <- omimGenes %>% 
+  filter(!omim_complex & !omim_nondisease) %>% 
+  convertGeneToHGNC(geneCol = "Gene")
+omimNonDiseaseConverted <- omimGenes %>% 
+  filter(omim_nondisease) %>% 
+  convertGeneToHGNC(geneCol = "Gene")
+omimComplexConverted <- omimGenes %>% 
+  filter(omim_complex) %>% 
+  convertGeneToHGNC(geneCol = "Gene")
+#getting inheritances
+# Extend OMIM data
+#Code from gene discovery paper
+omim <- read_tsv("/Volumes/ddd0/mn7/genemap2_2019_10_08.txt", skip = 3) %>% 
+  select(Gene = `Approved Symbol`, Phenotypes) %>% 
+  drop_na() %>% 
+  convertGeneToHGNC(geneCol = "Gene") 
+omim$MT <- ifelse(omim$Phenotypes == "",NA,ifelse(grepl(pattern = ", Mitochondrial", x = omim$Phenotypes, ignore.case = FALSE),"Y","N"))
+omim$AR <- ifelse(omim$Phenotypes == "",NA,ifelse(grepl(pattern = "Autosomal recessive", x = omim$Phenotypes, ignore.case = FALSE),"Y","N"))
+omim$AD <- ifelse(omim$Phenotypes == "",NA,ifelse(grepl(pattern = "Autosomal dominant", x = omim$Phenotypes, ignore.case = FALSE),"Y","N"))
+omim$XLd <- ifelse(omim$Phenotypes == "",NA,ifelse(grepl(pattern = "X-linked dominant", x = omim$Phenotypes, ignore.case = FALSE),"Y","N"))
+omim$XLr <- ifelse(omim$Phenotypes == "",NA,ifelse(grepl(pattern = "X-linked recessive", x = omim$Phenotypes, ignore.case = FALSE),"Y","N"))
+omim$IS <- ifelse(omim$Phenotypes == "",NA,ifelse(grepl(pattern = "isolated cases", x = omim$Phenotypes, ignore.case = FALSE),"Y","N"))
+omim$Inheritance_pattern <- rep(NA,length(omim$Gene))
+omim$Inheritance_pattern[which(omim$MT=="Y")] <- "MT"
+omim$Inheritance_pattern[which(omim$XLd == "Y")]<- ifelse(is.na(omim$Inheritance_pattern[which(omim$XLd == "Y")]),"XLd",paste(omim$Inheritance_pattern[which(omim$XLd == "Y")],"XLd",sep=","))
+omim$Inheritance_pattern[which(omim$XLr == "Y")]<- ifelse(is.na(omim$Inheritance_pattern[which(omim$XLr == "Y")]),"XLr",paste(omim$Inheritance_pattern[which(omim$XLr == "Y")],"XLr",sep=","))
+omim$Inheritance_pattern[which(omim$AR == "Y")]<- ifelse(is.na(omim$Inheritance_pattern[which(omim$AR == "Y")]),"AR",paste(omim$Inheritance_pattern[which(omim$AR == "Y")],"AR",sep=","))
+omim$Inheritance_pattern[which(omim$AD == "Y")]<- ifelse(is.na(omim$Inheritance_pattern[which(omim$AD == "Y")]),"AD",paste(omim$Inheritance_pattern[which(omim$AD == "Y")],"AD",sep=","))
+omim$Inheritance_pattern[which(omim$IS == "Y")]<- ifelse(is.na(omim$Inheritance_pattern[which(omim$IS == "Y")]),"IS",paste(omim$Inheritance_pattern[which(omim$IS == "Y")],"IS",sep=","))
+omim_recessive <- omim %>%
+  filter(Inheritance_pattern %in% c("AR", "MT,AR")) %>% 
+  select(hgnc_id)
+omim_mono <- omim %>%
+  filter(!Inheritance_pattern %in% c("AR", "MT,AR")) %>% 
+  select(hgnc_id)
+
+#Get Clinvar genes with a phenotype
+clinvarVCFfiltered <- read_tsv("clinvar_20191003.vcf.gz", comment = '#', col_names = F, col_types = 'cccccccccccccc') %>% 
+  mutate(PHEN = str_remove(str_extract(X8, 'CLNDN=[^;]*;'), "CLNDN=")) %>% 
+  mutate(PHEN = str_remove(PHEN, "not_provided")) %>% 
+  mutate(PHEN = str_remove(PHEN, "|")) %>% 
+  mutate(PHEN = str_remove(PHEN, ";")) %>% 
+  filter(PHEN != '') %>% 
+  mutate(GENE = str_remove(str_extract(X8, 'GENEINFO=[^;]*:'), "GENEINFO=")) %>% 
+  #mutate(GENE = str_remove(GENE, ":")) %>% 
+  mutate(CLNSIG = str_remove(str_extract(X8, 'CLNSIG=[^;]*;'), "CLNSIG=")) %>% 
+  filter(CLNSIG %in% c("Pathogenic/Likely_pathogenic;", "Pathogenic;", "Likely_pathogenic;")) %>% 
+  mutate(CLNSIG = str_remove(CLNSIG, ";")) %>% 
+  mutate(ID = X3) %>% 
+  select(c(X1,X2,ID, PHEN, GENE, CLNSIG)) %>% 
+  drop_na(PHEN, GENE) 
+clinvarGenes <- clinvarVCFfiltered %>% 
+  select(GENE) %>% 
+  distinct() %>% 
+  transform(GENE = strsplit(GENE, "\\|")) %>%
+  unnest(GENE) %>% 
+  mutate(GENE = gsub(":.*", "", GENE)) %>% 
+  convertGeneToHGNC(geneCol = "GENE") %>% 
+  distinct(hgnc_id)
+#Clinvar recessive entries
+clinvarDom <- clinvarVCFfiltered %>% 
+  select(GENE, PHEN) %>% 
+  distinct() %>% 
+  transform(GENE = strsplit(GENE, "\\|")) %>%
+  unnest(GENE) %>% 
+  mutate(GENE = gsub(":.*", "", GENE)) %>% 
+  convertGeneToHGNC(geneCol = "GENE") %>% 
+  mutate(PHEN = str_to_lower(PHEN)) %>% 
+  filter(!str_detect(PHEN, "recessive")) %>% 
+  distinct(hgnc_id)
+
+clinvar_recessive <- clinvarVCFfiltered %>% 
+  select(GENE, PHEN) %>% 
+  distinct() %>% 
+  transform(GENE = strsplit(GENE, "\\|")) %>%
+  unnest(GENE) %>% 
+  mutate(GENE = gsub(":.*", "", GENE)) %>% 
+  convertGeneToHGNC(geneCol = "GENE") %>% 
+  mutate(PHEN = str_to_lower(PHEN)) %>% 
+  filter(str_detect(PHEN, "recessive") & !hgnc_id %in% clinvarDom$hgnc_id & !str_detect(PHEN, "dominant") & !str_detect(PHEN, "x-linked")) %>%
+  distinct(hgnc_id)
+clinvar_mono <- clinvarGenes %>% 
+  filter(!hgnc_id %in% clinvar_recessive$hgnc_id) %>% 
+  distinct(hgnc_id)
+
+#Log likelihood ratios for 1078 genes that are 3x as likely to be DD genes than not from K+J DDD paper
+llik3_genes <- read_tsv("forMatt_DDgene_likratio_gt3_2019_11_12.txt") %>% 
+  select(hgnc_id = num_hgnc_id)
+
+#Core essential genes from moffat G3 paper
+ceg2 <- read_tsv("CEG2.txt", col_names = c("gene", "hgnc_id"), col_types = 'cc') %>% 
+  mutate(hgnc_id = str_remove(hgnc_id, "HGNC:"))
+
+cellEssential3hit <- read_tsv("TableS3.txt") %>% 
+  #Remove screens filtered from study
+  #rename(GENE = Gene) %>% 
+  select(-BF_HELA,-BF_MV411,-BF_HT29, -BF_RPE1, -BF_K562) %>% 
+  mutate_each(funs(ifelse(.>6, 1, 0)), -GENE) %>% 
+  mutate(essentialLines = select(., -GENE) %>% rowSums(na.rm = TRUE)) %>% 
+  select(GENE, essentialLines) %>% 
+  filter(essentialLines >= 3) %>% 
+  convertGeneToHGNC(geneCol = "GENE") %>% 
+  distinct(hgnc_id, .keep_all = T) %>% 
+  select(-GENE)
+
+
+#Bayes factor for hap1 and kbm7 and Cell Essential Genes from Moffat Lab’s dataset on essentiality
+hap1Bayes <- read_tsv("TableS3.txt") %>% 
+  select(GENE, BF_HAP1) %>% 
+  drop_na() %>% 
+  convertGeneToHGNC(geneCol = "GENE") %>% 
+  #Select highest bayes factor on gene duplicates
+  arrange(hgnc_id, desc(BF_HAP1)) %>% 
+  distinct(hgnc_id, .keep_all = T) %>% 
+  select(-GENE)
+kbm7Bayes <- read_tsv("TableS3.txt") %>% 
+  select(GENE, BF_KBM7) %>% 
+  drop_na() %>% 
+  convertGeneToHGNC(geneCol = "GENE") %>% 
+  #Select highest bayes factor on gene duplicates
+  arrange(hgnc_id, desc(BF_KBM7)) %>% 
+  distinct(hgnc_id, .keep_all = T) %>% 
+  select(-GENE)
+
+
+#Summed essentiality from Garnett lab’s SCORE project
+cancerCellLines <- read_csv("Supplementary Table 2 - Fitness genes and pathway enrichments.csv") %>%
+  mutate(summed_cell_lines = rowSums(.[2:326])) %>% 
+  mutate(gene = Gene.name) %>% 
+  select(gene, summed_cell_lines) %>% 
+  convertGeneToHGNC(geneCol = "gene") %>% 
+  #Select highest cell essential count on gene duplicates
+  arrange(hgnc_id, desc(summed_cell_lines)) %>% 
+  distinct(hgnc_id, .keep_all = T) %>% 
+  select(-gene)
+
+#GTEX median gene expression by tissue
+gtexMedianother <- read_tsv("GTEx_Analysis_2017-06-05_v8_RNASeQCv1.1.9_gene_median_tpm.gct.gz", skip = 2) %>% 
+  mutate(tissuesTPMover1 = rowSums(.[3:56] >= 1)) %>% 
+  mutate(tissuesTPMover5 = rowSums(.[3:56] >= 5)) %>% 
+  mutate(tissuesTPMover10 = rowSums(.[3:56] >= 10)) %>% 
+  mutate(gene = Description) %>% 
+  select(gene, tissuesTPMover1, tissuesTPMover5, tissuesTPMover10) %>% 
+  convertGeneToHGNC(geneCol = "gene") %>% 
+  arrange(hgnc_id, desc(tissuesTPMover5)) %>% 
+  distinct(hgnc_id, .keep_all = T) %>% 
+  select(-gene)
+
+cosmicCancerGenes <- read_tsv("cosmicCancerGenes.tsv") %>% 
+  select(gene = `Entrez GeneId`) %>%
+  drop_na() %>% 
+  left_join(hgncIDs, by =c("gene" = "entrez_gene_id") ) %>% 
+  select(hgnc_id) %>% 
+  unique()
+
+#Sexual reproduction GO
+
+reproductionGenes <- read_tsv("sexualReproductionGO.txt", col_names = c("gene", "GO", "organism")) %>% 
+  distinct(gene) %>% 
+  convertGeneToHGNC(geneCol = "gene") %>% 
+  select(hgnc_id) %>% 
+  unique()
+  
+#Gene lists from Kim et al AJHG 2019
+kimLists <- read_tsv("geneListsKim19.txt", comment = '#') 
+#604 genes with no significant variant-gene association in all 48 tissues in GTEx v.7 single-tissue cis-eQTL data.
+eQTLdeficient <- kimLists %>% 
+  select(gene = `eQTL0-deficient`) %>% 
+  drop_na() %>% 
+  left_join(hgncIDs, by =c("gene" = "entrez_gene_id") ) %>% 
+  select(hgnc_id) %>% 
+  unique()
+#High enhancer domain score genes as defined in https://www.biorxiv.org/content/biorxiv/early/2018/11/01/459123.full.pdf
+highEDS <- kimLists %>% 
+  select(gene = `High EDS`) %>% 
+  drop_na() %>% 
+  left_join(hgncIDs, by =c("gene" = "entrez_gene_id") ) %>% 
+  select(hgnc_id) %>% 
+  unique()
+#Is a transcription factor gene
+txFactor <- kimLists %>% 
+  select(gene = TF) %>% 
+  drop_na() %>% 
+  left_join(hgncIDs, by =c("gene" = "entrez_gene_id") ) %>% 
+  select(hgnc_id) %>% 
+  unique()
+exacHaploinsufficient <- kimLists %>% 
+  select(gene = Haploinsufficient) %>% 
+  drop_na() %>% 
+  left_join(hgncIDs, by =c("gene" = "entrez_gene_id") ) %>% 
+  select(hgnc_id) %>% 
+  unique()
+#Protein network centrality from two protein networks
+inWebCentrality <- read_tsv("inWebCentrality.txt", comment = '#') %>% 
+  left_join(hgncIDs, by =c("ENTREZ" = "entrez_gene_id") ) %>% 
+  rename(inweb_closeness = Closeness) %>% 
+  select(hgnc_id, inweb_closeness) %>% 
+  unique()
+greeneCentrality <- read_tsv("greeneCentrality.txt", comment = '#') %>% 
+  left_join(hgncIDs, by =c("ENTREZ" = "entrez_gene_id") ) %>% 
+  rename(greene_closeness = Closeness) %>% 
+  select(hgnc_id, greene_closeness) %>% 
+  unique()
+
+
+#Gene lists clones from https://github.com/macarthur-lab/gene_lists
+drugTargets <- read_tsv("gene_lists/lists/fda_approved_drug_targets.tsv", col_names = "gene") %>% 
+  convertGeneToHGNC(geneCol = "gene") 
+#mouseEssential <- read_tsv("gene_lists/lists/mgi_essential.tsv", col_names = "gene") %>% 
+#  convertGeneToHGNC(geneCol = "gene")
+clinGenHaploinsufficient <- read_tsv("gene_lists/lists/clingen_level3_genes_2018_09_13.tsv", col_names = "gene") %>% 
+  convertGeneToHGNC(geneCol = "gene")
+olfactoryReceptor <- read_tsv("gene_lists/lists/olfactory_receptors.tsv", col_names = "gene") %>% 
+  convertGeneToHGNC(geneCol = "gene")
+exacHomozygous_lof_tolerant <- read_tsv("gene_lists/lists/homozygous_lof_tolerant_twohit.tsv", col_names = "gene") %>% 
+  convertGeneToHGNC(geneCol = "gene")
+nearestGWAS_peakGene <- read_tsv("gene_lists/lists/gwascatalog.tsv", col_names = "gene") %>% 
+  convertGeneToHGNC(geneCol = "gene")
+
+#Num probes in UKBB for that analysis
+#UKBB probe counts
+probes <- read_csv("../ukbb/Axiom_UKB_WCSG.na34.annot.csv", comment = "#") %>% 
+  select(affy_snp_id = `Affy SNP ID`, genes = `Associated Gene`) %>% 
+  filter(genes!= "---") %>% 
+  separate(genes, into = c("gene"), sep = " /// ", extra = "drop") %>% 
+  separate(gene, into = c("transcript", "csq", "c", "d", "gene", "f", "g"), sep = " // ") %>% 
+  drop_na() %>% 
+  filter(gene != "---" & csq != "downstream" & csq != "upstream") %>% 
+  group_by(gene) %>% 
+  summarize(n_probes = n()) %>% 
+  convertGeneToHGNC(geneCol = "gene") %>% 
+  select(-gene) %>% 
+  distinct(hgnc_id, .keep_all = T)
+
+```
+
+
+## Matrix Creation
+Create a base matrix with only protein coding genes as annotated by HGNC that ALSO have a gnomAD pLI score
+```{r baseMatrix, echo=FALSE, warning=FALSE}
+baseMatrix <- gnomADGenes %>% 
+  left_join(hgncIDs, by = "hgnc_id") %>% 
+  select(hgnc_id, symbol, ensembl_gene_id, pLI, exac_pLI, oe_lof_upper, mis_z, syn_z, lof_synRatio, gene_length, cds_length, num_coding_exons) %>% 
+  distinct() %>% 
+  drop_na(pLI) %>% 
+  arrange(desc(pLI), symbol) 
+```
+
+Add in various annotations that were previously loaded and formatted
+```{r fullMatrix, echo=FALSE, warning=FALSE}
+#Add disease gene annotations
+fullMatrix <- baseMatrix %>% 
+  mutate(DD = ifelse(hgnc_id %in% develGenes$hgnc_id, 1, 0)) %>% 
+  mutate(ddg2p_mono = ifelse(hgnc_id %in% ddg2p_mono$hgnc_id, 1, 0)) %>% 
+  mutate(ddg2p_recessive = ifelse(hgnc_id %in% ddg2p_recessive$hgnc_id, 1, 0)) %>% 
+  mutate(OMIM = ifelse(hgnc_id %in% omimConverted$hgnc_id, 1, 0)) %>% 
+  mutate(OMIM_mono = ifelse(hgnc_id %in% omim_mono$hgnc_id, 1, 0)) %>%
+  mutate(OMIM_recessive = ifelse(hgnc_id %in% omim_recessive$hgnc_id, 1, 0)) %>%
+  mutate(OMIM_nondisease = ifelse(hgnc_id %in% omimNonDiseaseConverted$hgnc_id, 1, 0)) %>% 
+  mutate(OMIM_complex = ifelse(hgnc_id %in% omimComplexConverted$hgnc_id, 1, 0)) %>% 
+  mutate(ClinVar = ifelse(hgnc_id %in% clinvarGenes$hgnc_id, 1, 0)) %>% 
+  mutate(ClinVar_mono = ifelse(hgnc_id %in% clinvar_mono$hgnc_id, 1, 0)) %>% 
+  mutate(ClinVar_recessive = ifelse(hgnc_id %in% clinvar_recessive$hgnc_id, 1, 0)) %>% 
+  mutate(loglike3x = ifelse(hgnc_id %in% llik3_genes$hgnc_id, 1, 0)) %>% 
+  mutate(cellEssentialCore = ifelse(hgnc_id %in% ceg2$hgnc_id, 1, 0)) %>%
+  mutate(cellEssential3hit = ifelse(hgnc_id %in% cellEssential3hit$hgnc_id, 1, 0)) %>%
+  left_join(geneDiscovery, by = "hgnc_id") %>% 
+  left_join(ddd19, by = "hgnc_id") %>% 
+  left_join(hap1Bayes, by = "hgnc_id") %>% 
+  left_join(kbm7Bayes, by = "hgnc_id") %>% 
+  left_join(cancerCellLines, by = "hgnc_id") %>% 
+  left_join(gtexMedianother, by = "hgnc_id") %>% 
+  left_join(greeneCentrality, by = "hgnc_id") %>% 
+  left_join(inWebCentrality, by = "hgnc_id") %>% 
+  left_join(probes, by = "hgnc_id") %>% 
+  mutate(drugTargets = ifelse(hgnc_id %in% drugTargets$hgnc_id, 1, 0)) %>% 
+  mutate(clinGenHaploinsufficient = ifelse(hgnc_id %in% clinGenHaploinsufficient$hgnc_id, 1, 0)) %>% 
+  mutate(olfactoryReceptor = ifelse(hgnc_id %in% olfactoryReceptor$hgnc_id, 1, 0)) %>% 
+  mutate(exacHaploinsufficient = ifelse(hgnc_id %in% exacHaploinsufficient$hgnc_id, 1, 0)) %>% 
+  mutate(exacHomozygous_lof_tolerant = ifelse(hgnc_id %in% exacHomozygous_lof_tolerant$hgnc_id, 1, 0)) %>% 
+  mutate(nearestGWAS_peakGene = ifelse(hgnc_id %in% nearestGWAS_peakGene$hgnc_id, 1, 0)) %>% 
+  mutate(eQTLdeficient = ifelse(hgnc_id %in% eQTLdeficient$hgnc_id, 1, 0)) %>% 
+  mutate(highEDS = ifelse(hgnc_id %in% highEDS$hgnc_id, 1, 0)) %>% 
+  mutate(txFactor = ifelse(hgnc_id %in% txFactor$hgnc_id, 1, 0)) %>% 
+  mutate(cosmicCancer = ifelse(hgnc_id %in% cosmicCancerGenes$hgnc_id, 1, 0)) %>% 
+  mutate(reproductionGene = ifelse(hgnc_id %in% reproductionGenes$hgnc_id, 1, 0)) %>% 
+  #Add in group label for downstream analyses
+  mutate(geneGroup = ifelse(pLI >= 0.9, "noPheno", "other")) %>% 
+  mutate(geneGroup = ifelse(pLI >= 0.9 & cellEssential3hit, "cellEssential", geneGroup)) %>% 
+  mutate(geneGroup = ifelse(pLI >= 0.9 & (DD |OMIM | ClinVar), "disease", geneGroup)) %>% 
+  #mutate(geneGroup = ifelse(reproductionGene, "reproGene", geneGroup)) #%>% 
+  mutate(geneGroup = ifelse(pLI < 0.9 & (DD |OMIM | ClinVar | cellEssential3hit), "lowPLIpheno", geneGroup)) %>% 
+  distinct(hgnc_id, .keep_all = T)
+  
+```
+
+### Export Genelists
+```{r genelistsUKBB}
+#Create gene lists to save for ukbb analyses
+geneListUKBB <- fullMatrix %>%  
+  select(ensembl_gene_id, geneGroup, gene_length, n_probes) %>% 
+  mutate(n_probes = replace_na(n_probes, 0)) %>% 
+  drop_na()
+saveRDS(geneListUKBB, file = "geneListUKBB.rds")
+#saveRDS(geneListUKBB, file = "geneListUKBBrepro.rds")
+geneListUKBBkaitlin <- fullMatrix %>%  
+  select(hgnc_id, symbol, ensembl_gene_id, geneGroup)
+write_tsv(geneListUKBBkaitlin, "geneGroupsKaitlin.txt")
+
+
+#Genelists for Eugene's Cognition analysis
+highPLI <- fullMatrix %>% 
+  filter(pLI >= 0.9) %>% 
+  select(ensembl_gene_id)
+write_tsv(highPLI, "geneLists/highPLI.txt", col_names = F)
+highPLI_noPheno <- fullMatrix %>% 
+  filter(geneGroup == "noPheno") %>% 
+  select(ensembl_gene_id)
+write_tsv(highPLI_noPheno, "geneLists/highPLI_noPheno.txt", col_names = F)
+highPLI_essential <- fullMatrix %>% 
+  filter(geneGroup == "cellEssential") %>%  
+  select(ensembl_gene_id)
+write_tsv(highPLI_essential, "geneLists/highPLI_essential.txt", col_names = F)
+highPLI_disease <- fullMatrix %>% 
+  filter(geneGroup == "disease") %>%  
+  select(ensembl_gene_id)
+write_tsv(highPLI_disease, "geneLists/highPLI_disease.txt", col_names = F)
+lowPLIpheno <- fullMatrix %>% 
+  filter(geneGroup == "lowPLIpheno") %>%  
+  select(ensembl_gene_id)
+write_tsv(highPLI_disease, "geneLists/lowPLIpheno.txt", col_names = F)
+otherGenes <- fullMatrix %>% 
+  filter(geneGroup == "other") %>%  
+  select(ensembl_gene_id)
+write_tsv(highPLI_disease, "geneLists/otherGenes.txt", col_names = F)
+```
+
+## Matrix Plots
+Basic correlation plot of most variales (excluding those with many NAs)
+```{r correlationPlot, echo=FALSE, fig.height=18, fig.width=18, message=FALSE, warning=FALSE}
+#Show correlation plot
+fullMatrix %>% 
+  select(-symbol, -hgnc_id, -ensembl_gene_id,-summed_cell_lines, -olfactoryReceptor, -geneGroup, -s_het) %>% 
+  drop_na() %>% 
+  cor() %>% 
+  round(digits = 2) %>% 
+  reorder_cormat() %>% 
+  get_upper_tri() %>% 
+  melt(na.rm = TRUE) %>% 
+  ggplot(aes(Var2, Var1, fill = value))+
+  geom_tile(color = "white")+
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white", 
+                       midpoint = 0, limit = c(-1,1), space = "Lab", 
+                       name="Pearson\nCorrelation") +
+  theme_minimal()+ # minimal theme
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, 
+                                   size = 12, hjust = 1))+
+  coord_fixed() +
+  geom_text(aes(Var2, Var1, label = value), color = "black", size = 4) +
+  theme(
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.border = element_blank(),
+    panel.background = element_blank(),
+    axis.ticks = element_blank(),
+    legend.justification = c(1, 0),
+    legend.position = c(0.6, 0.7),
+    legend.direction = "horizontal")+
+  guides(fill = guide_colorbar(barwidth = 7, barheight = 1,
+                               title.position = "top", title.hjust = 0.5))
+
+
+```
+
+Visualize with upset plot which high pLI (> 0.9) genes have disease annotation from different sources
+```{r upsetPlot, echo=FALSE, fig.height=3, fig.width=5, warning=FALSE, dpi = 400}
+#Visualize which high pLI genes have disease annotation from different sources
+
+as.data.frame(fullMatrix) %>% 
+  filter(pLI >= 0.9) %>% 
+  mutate(noPheno= ifelse(geneGroup == "noPheno", 1, 0)) %>% 
+  mutate(cellEssential= ifelse(geneGroup == "cellEssential", 1, 0)) %>%
+  mutate(disease= ifelse((DD |OMIM | ClinVar), 1, 0)) %>% 
+  as.data.frame() %>% 
+  upset(sets = c("noPheno", "cellEssential",  "disease"), sets.bar.color = "#56B4E9", order.by = "freq", text.scale = 1.5)
+
+#With 3 hit essential
+reportUpset <- as.data.frame(fullMatrix) %>% 
+  mutate(noPheno= ifelse(geneGroup == "noPheno", 1, 0)) %>% 
+  mutate(disease= ifelse(geneGroup == "disease", 1, 0)) %>% 
+  mutate(cellEssential= ifelse(cellEssential3hit & pLI > 0.9, 1, 0)) %>%
+  mutate(lowPLIpheno= ifelse(geneGroup == "lowPLIpheno", 1, 0)) %>% 
+  mutate(other= ifelse(geneGroup == "other", 1, 0)) %>% 
+  upset(sets = c("noPheno", "cellEssential",  "disease", "lowPLIpheno", "other"), sets.bar.color = "#56B4E9", text.scale = 2)
+
+#Alternative possible groupings out of no Pheno With GD lists, and cancer
+as.data.frame(fullMatrix) %>% 
+  filter(pLI >= 0.9 & geneGroup == "noPheno") %>% 
+  mutate(cancerGene= ifelse((cancer_gene | cosmicCancer), 1, 0)) %>% 
+  mutate(disease= ifelse((DD |OMIM | ClinVar), 1, 0)) %>% 
+  mutate(noPheno= ifelse(geneGroup == "noPheno", 1, 0)) %>%
+  upset(sets = c("noPheno", "lethal_het_mouse", "cancerGene","lethal_hom_mouse"), sets.bar.color = "#56B4E9", order.by = "freq", text.scale = 1.5)
+as.data.frame(fullMatrix) %>% 
+  filter(pLI >= 0.9) %>% 
+  mutate(high_pLI = 1) %>% 
+  mutate(cellEssential = ifelse(geneGroup == "cellEssential", 1, 0)) %>% 
+  upset(sets = c("high_pLI", "DD", "OMIM", "ClinVar", "cellEssential"), sets.bar.color = "#56B4E9", order.by = "freq", text.scale = 1.5)
+#With mode of inheritance
+as.data.frame(fullMatrix) %>% 
+  filter(pLI >= 0.9) %>% 
+  mutate(high_pLI = 1) %>% 
+  mutate(cellEssential = ifelse(geneGroup == "cellEssential", 1, 0)) %>% 
+  upset(sets = c("high_pLI", "ddg2p_recessive", "ddg2p_mono", "OMIM_mono", "OMIM_recessive", "ClinVar_mono", "ClinVar_recessive", "cellEssential"), sets.bar.color = "#56B4E9", order.by = "freq", text.scale = 1.5)
+as.data.frame(fullMatrix) %>% 
+  filter(pLI >= 0.9) %>% 
+  mutate(noPheno= ifelse(geneGroup == "noPheno", 1, 0)) %>% 
+  mutate(cellEssential= ifelse(geneGroup == "cellEssential", 1, 0)) %>%
+  mutate(disease_mono= ifelse(geneGroup == "disease", 1, 0)) %>% 
+  mutate(disease_recessive= ifelse(geneGroup == "recessive", 1, 0)) %>% 
+  as.data.frame() %>% 
+  upset(sets = c("noPheno", "cellEssential3hit",  "disease_mono", "disease_recessive", "loglike3x"), sets.bar.color = "#56B4E9", text.scale = 1.5)
+
+```
+
+### Enrichment test
+```{r enrichment, echo=FALSE, fig.height=5, fig.width=4, warning=FALSE}
+#names of features in both dataframe and used for plotting
+all_feat_terms <- c("pLI","exac_pLI","oe_lof_upper","s_het","mis_z","syn_z","gene_length","lof_synRatio","cds_length","num_coding_exons", "dNdS_macaque","CODING_GERP", "PROMOTER_GERP","cancer_gene", "cosmicCancer","PPI_DGR","PPI_BTWN", "PPI_LLS2HI",  "median_fetalbrain_rpkm", "relevant_go","BF_HAP1", "BF_KBM7", "summed_cell_lines" , "tissuesTPMover1", "tissuesTPMover5" ,"tissuesTPMover10",  "greene_closeness", "inweb_closeness", "drugTargets", "nearestGWAS_peakGene", "eQTLdeficient", "highEDS", "txFactor")
+forplot_terms <- c("Macaque dN/dS","coding GERP","promoter GERP","CDS length","Somatic Driver Gene",
+                   "Network Degree","Network Betweeness","Network Distance to consensus DD gene",
+                   "Median RPKM fetal brain","Relevant GO term","pLI")
+
+#get mean across features by diagnostic group
+group.means <- aggregate(fullMatrix[,all_feat_terms], list(fullMatrix$geneGroup), mean,na.rm = T) %>% 
+  filter(Group.1 != "lowPLIpheno")
+#calculate how enriched these are compared to 'none' diagnostic group
+group.enrich <- group.means %>% 
+  select(-Group.1) %>%
+  sweep(MARGIN = 2, FUN = "/", STATS = t(group.means[4,-1])) %>% 
+  slice(-4) %>% 
+  mutate(group = group.means$Group.1[1:3]) %>% 
+  melt(id.vars = "group") %>% 
+  rename(feature = variable) %>% 
+  mutate(feature = as.character(feature))
+
+#Workaround to get CIs in
+dt <- data.table(group.enrich)
+dt <- dt[,c("lower","upper"):=getCIs(feature,group,as.data.frame(fullMatrix)),by=1:nrow(dt)]
+
+
+group.transformed <- dt %>% 
+  mutate(lower = log10(lower)) %>% 
+  mutate(upper = log10(upper)) %>% 
+  mutate(value = log10(value))
+
+#Permutation significance test
+sigTable <- group.enrich %>% 
+  mutate(group1 = "noPheno") %>% 
+  select(group1, group2 = group, feature = feature) %>% 
+  filter(group2 != "noPheno") %>% 
+  data.table()
+sigTablePs <- sigTable[,"p":=getSig(feat=feature,groupA=group1,groupB=group2,df=as.data.frame(fullMatrix),nsim=1000),by=1:nrow(sigTable)]
+
+#Format for plotting
+
+#getSig(feat = "pLI", groupA ="noPheno" , groupB = "disease", df = as.data.frame(fullMatrix), nsim = 10000)
+
+#Order variables by converting to factors
+group.transformed$group <- factor(group.transformed$group, levels = c("cellEssential", "disease", "noPheno"))
+group.transformed$feature <- factor(group.transformed$feature, levels = c("pLI","exac_pLI","oe_lof_upper","s_het","mis_z","syn_z","lof_synRatio","dNdS_macaque","CODING_GERP", "PROMOTER_GERP", "gene_length","cds_length","num_coding_exons", "PPI_DGR","PPI_BTWN", "PPI_LLS2HI", "greene_closeness", "inweb_closeness", "BF_HAP1", "BF_KBM7", "summed_cell_lines", "median_fetalbrain_rpkm", "tissuesTPMover1", "tissuesTPMover5" ,"tissuesTPMover10", "eQTLdeficient", "txFactor", "highEDS", "cancer_gene", "cosmicCancer", "drugTargets", "nearestGWAS_peakGene", "relevant_go"))
+
+#Contraint and basics
+sigTableA <- sigTablePs %>% 
+  filter(feature %in% c("pLI","exac_pLI","oe_lof_upper","s_het","mis_z","lof_synRatio","dNdS_macaque","CODING_GERP", "PROMOTER_GERP", "gene_length","cds_length","num_coding_exons"))
+group.transformed %>% 
+  filter(feature %in% c("pLI","exac_pLI","oe_lof_upper","s_het","mis_z","lof_synRatio","dNdS_macaque","CODING_GERP", "PROMOTER_GERP", "gene_length","cds_length","num_coding_exons")) %>% 
+  ggplot(aes(group = group, fill = group, y=value, x=feature)) +
+  coord_flip() +
+  ylim(-1.2,1.2) +
+  geom_bar(position="dodge", stat="identity") +
+  geom_errorbar(aes(ymin=lower, ymax=upper), width=.1,position=position_dodge(.9)) +
+  scale_fill_manual(values=myColorsCombo) +
+  theme_minimal()  +
+  ylab("Log10(Mean high pLI group/Mean other set)") +
+  stat_pvalue_manual(sigTableA, x = "feature", y.position = 1,label = "p = {p}",position = position_dodge(0.8), inherit.aes = FALSE)
+
+#networks and cell essential
+sigTableB = sigTablePs %>% 
+  filter(feature %in% c("PPI_DGR","PPI_BTWN", "PPI_LLS2HI", "greene_closeness", "inweb_closeness",  "summed_cell_lines"))
+group.transformed %>% 
+  filter(feature %in% c("PPI_DGR","PPI_BTWN", "PPI_LLS2HI", "greene_closeness", "inweb_closeness",  "summed_cell_lines")) %>% 
+  ggplot(aes(group = group, fill = group, y=value, x=feature)) +
+  coord_flip() +
+  ylim(-1.2,1.2) +
+  geom_bar(position="dodge", stat="identity") +
+  geom_errorbar(aes(ymin=lower, ymax=upper), width=.1,position=position_dodge(.9)) +
+  scale_fill_manual(values=myColorsCombo) +
+  theme_minimal() +
+  ylab("Log10(Mean high pLI group/Mean other set)") +
+  stat_pvalue_manual(sigTableB, x = "feature", y.position = 1,label = "p = {p}",position = position_dodge(0.8), inherit.aes = FALSE)
+
+
+#disease and expression
+sigTableC= sigTablePs %>% 
+  filter(feature %in% c("median_fetalbrain_rpkm", "tissuesTPMover1", "tissuesTPMover5" ,"tissuesTPMover10", "nearestGWAS_peakGene", "relevant_go", "cosmicCancer"))
+group.transformed %>% 
+  filter(feature %in% c("median_fetalbrain_rpkm", "tissuesTPMover1", "tissuesTPMover5" ,"tissuesTPMover10",  "nearestGWAS_peakGene", "relevant_go", "cosmicCancer")) %>% 
+  ggplot(aes(group = group, fill = group, y=value, x=feature)) +
+  coord_flip() +
+  ylim(-1.2,1.2) +
+  geom_bar(position="dodge", stat="identity") +
+  geom_errorbar(aes(ymin=lower, ymax=upper), width=.1,position=position_dodge(.9)) +
+  scale_fill_manual(values=myColorsCombo) +
+  theme_minimal() +
+  ylab("Log10(Mean high pLI group/Mean other set)") +
+  stat_pvalue_manual(sigTableC, x = "feature", y.position = 1,label = "p = {p}",position = position_dodge(0.8), inherit.aes = FALSE)
+```
+
+### Report Enrichment 
+```{r report_enrichment, echo=FALSE, fig.height=3, fig.width=6, warning=FALSE}
+#names of features in both dataframe and used for plotting
+sigTableReportA = sigTablePs %>% 
+  filter(feature %in% c("pLI", "mis_z", "gene_length", "num_coding_exons"))
+enrPlotA <- group.transformed %>% 
+  filter(feature %in% c("pLI", "mis_z", "gene_length", "num_coding_exons")) %>% 
+  ggplot(aes(group = group, fill = group, y=value, x=feature)) +
+  coord_flip() +
+  ylim(-0.25,1.5) +
+  geom_bar(position="dodge", stat="identity") +
+  geom_errorbar(aes(ymin=lower, ymax=upper), width=.1,position=position_dodge(.9)) +
+  scale_fill_manual(values=myColorsCombo) +
+  theme_minimal() +
+  geom_hline(yintercept = 0, colour = "darkgrey") +
+  ylab("Log10(Mean high pLI group/Mean other set)") +
+  stat_pvalue_manual(sigTableReportA, x = "feature", y.position = 1.2,label = "p = {p}",position = position_dodge(0.8), inherit.aes = FALSE)
+
+sigTableReportB = sigTablePs %>% 
+  filter(feature %in% c("PPI_BTWN", "median_fetalbrain_rpkm", "nearestGWAS_peakGene",  "relevant_go"))
+enrPlotB <- group.transformed %>% 
+  filter(feature %in% c("PPI_BTWN", "median_fetalbrain_rpkm", "nearestGWAS_peakGene",  "relevant_go")) %>% 
+  ggplot(aes(group = group, fill = group, y=value, x=feature)) +
+  coord_flip() +
+  ylim(-0.25,1.5) +
+  geom_bar(position="dodge", stat="identity") +
+  geom_errorbar(aes(ymin=lower, ymax=upper), width=.1,position=position_dodge(.9)) +
+  scale_fill_manual(values=myColorsCombo) +
+  theme_minimal() +
+  geom_hline(yintercept = 0, colour = "darkgrey") +
+  ylab("Log10(Mean high pLI group/Mean other set)") +
+  stat_pvalue_manual(sigTableReportB, x = "feature", y.position = 1.2,label = "p = {p}",position = position_dodge(0.8), inherit.aes = FALSE)
+
+enrPlotA + enrPlotB + plot_layout(guides = 'collect')
+```
+
+Miscellaneous plots
+```{r miscPlot, echo=FALSE, fig.height=5, fig.width=5, message=FALSE, warning=FALSE}
+
+noPhenoSynZ <- fullMatrix %>% 
+  filter(geneGroup == "noPheno") %>% 
+  select(syn_z)  
+hist(noPhenoSynZ$syn_z, breaks = 50)
+
+customDistribution = function(feature, boxPlotWidth=0.2) {
+  featureData <- fullMatrix %>% 
+    select(symbol, feature, geneGroup) %>% 
+    filter(geneGroup != "lowPLIpheno" & geneGroup != "other")
+  
+  feature_comparisons <- list( c("cellEssential", "disease"), c("cellEssential", "noPheno"), c("disease", "noPheno"))
+  featureData$geneGroup <- factor(featureData$geneGroup, levels = c("cellEssential", "disease", "noPheno"))
+  
+  featurePlot <- ggplot(featureData, aes_string(x="geneGroup", feature, fill = "geneGroup")) +
+    geom_violin(scale = "area") +
+    scale_fill_manual(values = myColors) +
+    geom_boxplot(width=boxPlotWidth, fill="white", outlier.shape = NA) +
+    stat_compare_means(comparisons = feature_comparisons)
+  return(featurePlot)
+}
+customDistribution(feature = "cds_length")
+customDistribution(feature = "lof_synRatio")
+customDistribution(feature = "oe_lof_upper")
+customDistribution(feature = "syn_z")
+customDistribution(feature = "BF_HAP1")
+customDistribution(feature = "PPI_BTWN")
+customDistribution(feature = "PPI_DGR")
+customDistribution(feature = "greene_closeness")
+customDistribution(feature = "inweb_closeness", boxPlotWidth = 0.05)
+```
+
+```{r GOsets, echo=FALSE, warning=FALSE}
+
+#Create lists for GO analysis
+highPLI <- fullMatrix %>% 
+  filter(pLI >= 0.9) %>% 
+  select(ensembl_gene_id)
+write_tsv(highPLI, "geneLists/highPLI.txt", col_names = F)
+highPLI_noPheno <- fullMatrix %>% 
+  filter(geneGroup == "noPheno") %>% 
+  select(ensembl_gene_id)
+write_tsv(highPLI_noPheno, "geneLists/highPLI_noPheno.txt", col_names = F)
+highPLI_essential <- fullMatrix %>% 
+  filter(geneGroup == "cellEssential") %>%  
+  select(ensembl_gene_id)
+write_tsv(highPLI_essential, "geneLists/highPLI_essential.txt", col_names = F)
+highPLI_disease <- fullMatrix %>% 
+  filter(geneGroup == "disease") %>%  
+  select(ensembl_gene_id)
+write_tsv(highPLI_disease, "geneLists/highPLI_disease.txt", col_names = F)
+otherGenes <- fullMatrix %>% 
+  filter(geneGroup == "other") %>%  
+  select(ensembl_gene_id)
+write_tsv(highPLI_disease, "geneLists/otherGenes.txt", col_names = F)
+
+#Read in results
+GOnoPheno <- read_tsv("GO/noPhenoGOhighpLIbackground.txt")
+GOdisease <- read_tsv("GO/diseaseGOhighpLIbackground.txt")
+GOessential <- read_tsv("GO/cellEssentialGOhighpLIbackground.txt")
+```
+
+
+# Expression Analysis
+
+## GTEX
+```{r gtex analysis, echo=FALSE, warning=FALSE, fig.height=6, fig.width=15}
+
+gtexMedian <- read_tsv("GTEx_Analysis_2017-06-05_v8_RNASeQCv1.1.9_gene_median_tpm.gct.gz", skip = 2) %>% 
+  rename(gene = Description) %>%
+  convertGeneToHGNC(geneCol = "gene") %>% 
+  mutate(tissuesTPMover5 = rowSums(.[3:56] >= 5)) %>% 
+  #Decide how to filter here
+  arrange(hgnc_id, desc(tissuesTPMover5)) %>% 
+  distinct(hgnc_id, .keep_all = T)
+
+gtexGenes <- fullMatrix %>% 
+  select(hgnc_id, geneGroup) %>% 
+  filter(geneGroup != "lowPLIpheno") %>% 
+  left_join(gtexMedian, by = "hgnc_id") %>% 
+  drop_na()
+names(gtexGenes) <- str_replace_all(names(gtexGenes), c(" " = "" , "-" = "_","\\(" = ".", "\\)" = "" ))
+gtexGenes$geneGroup <- factor(gtexGenes$geneGroup, levels = c("other", "cellEssential", "disease", "noPheno"))
+gtexNtissues <- gtexGenes %>% 
+  mutate(tissuesTPMover01 = rowSums(.[3:56] >= 0.1)) %>% 
+  mutate(tissuesTPMover1 = rowSums(.[3:56] >= 1)) %>% 
+  mutate(tissuesTPMover5 = rowSums(.[3:56] >= 5)) %>% 
+  mutate(tissuesTPMover10 = rowSums(.[3:56] >= 10)) %>% 
+  select(hgnc_id, gene, geneGroup, tissuesTPMover01, tissuesTPMover1, tissuesTPMover5, tissuesTPMover10) 
+
+gtexNtissues$geneGroup <- factor(gtexNtissues$geneGroup, levels = c("other", "cellEssential", "disease", "noPheno"))
+
+my_comparisons <- list(c("cellEssential", "disease"), c("cellEssential", "noPheno"), c("disease", "noPheno") )
+my_comparisons2 <- list(c("cellEssential", "noPheno"), c("disease", "noPheno") )
+my_comparisons3 <- list(c("disease", "noPheno") )
+
+ggplot(gtexNtissues, aes(x=geneGroup, y=tissuesTPMover01, fill = geneGroup)) +
+  geom_violin(scale = "area") +
+  scale_fill_manual(values = myColorsother) +
+  geom_boxplot(width=0.05, fill="white", outlier.shape = NA) +
+  stat_compare_means(comparisons = my_comparisons2, size = 8) +
+  theme(text = element_text(size=20))
+ggplot(gtexNtissues, aes(x=geneGroup, y=tissuesTPMover1, fill = geneGroup)) +
+  geom_violin(scale = "area") +
+  scale_fill_manual(values = myColorsother) +
+  geom_boxplot(width=0.05, fill="white", outlier.shape = NA) +
+  stat_compare_means(comparisons = my_comparisons2, size = 8) +
+  theme(text = element_text(size=20))
+ggplot(gtexNtissues, aes(x=geneGroup, y=tissuesTPMover5, fill = geneGroup)) +
+  geom_violin(scale = "area") +
+  scale_fill_manual(values = myColorsother) +
+  geom_boxplot(width=0.05, fill="white", outlier.shape = NA) +
+  stat_compare_means(comparisons = my_comparisons2, size = 8) +
+  theme(text = element_text(size=20))
+ggplot(gtexNtissues, aes(x=geneGroup, y=tissuesTPMover10, fill = geneGroup)) +
+  geom_violin(scale = "area") +
+  scale_fill_manual(values = myColorsother) +
+  geom_boxplot(width=0.05, fill="white", outlier.shape = NA) +
+  stat_compare_means(comparisons = my_comparisons2, size = 8) +
+  theme(text = element_text(size=20))
+  
+
+#stat_pvalue_manual(yo , label = "p.adj") 
+#yo = compare_means(tissuesTPMover5 ~ geneGroup, gtexNtissues) %>% mutate(y.position = 55)
+
+
+pairwise.wilcox.test(gtexNtissues$tissuesTPMover01, gtexNtissues$geneGroup, p.adj = "bonf")
+pairwise.wilcox.test(gtexNtissues$tissuesTPMover1, gtexNtissues$geneGroup, p.adj = "bonf")
+pairwise.wilcox.test(gtexNtissues$tissuesTPMover5, gtexNtissues$geneGroup, p.adj = "bonf")
+pairwise.wilcox.test(gtexNtissues$tissuesTPMover10, gtexNtissues$geneGroup, p.adj = "bonf")
+
+
+gtexOverallMedian <- gtexGenes %>% 
+  #exclude all 0 values for expression
+  mutate_at(.vars = 5:58, ~na_if(.,0)) %>% 
+  #log2 transform
+  mutate_at(5:58, log2) %>% 
+  mutate(medianlog2_TPM = rowMedians(as.matrix(.[5:58]), na.rm = T)) %>% 
+  select(gene, geneGroup, medianlog2_TPM) %>% 
+  drop_na()
+
+gtexOverallMedian$geneGroup <- factor(gtexOverallMedian$geneGroup, levels = c("other", "cellEssential", "disease", "noPheno"))
+ggplot(gtexOverallMedian, aes(x=geneGroup, y=medianlog2_TPM, fill = geneGroup)) +
+  geom_violin(scale = "area") +
+  scale_fill_manual(values = myColorsother) +
+  geom_boxplot(width=0.05, fill="white", outlier.shape = NA) +
+  stat_compare_means(comparisons = my_comparisons2, size = 8) +
+  theme(text = element_text(size=20))
+
+pairwise.wilcox.test(gtexOverallMedian$medianlog2_TPM, gtexOverallMedian$geneGroup, p.adj = "bonf")
+```
+
+### Tissue Specific
+```{r tissue_specific, echo=FALSE, warning=FALSE, fig.height=10, fig.width=14}
+
+#Find enrichment by tissue
+gtexTissueEnr <- gtexGenes %>% 
+  select(-tissuesTPMover5) %>% 
+  #exclude all 0 values for expression
+  mutate_at(.vars = 5:58, ~na_if(.,0)) %>% 
+  #log2 transform
+  mutate_at(5:58, log2) %>% 
+  mutate(Median = rowMedians(as.matrix(.[5:58]), na.rm = T))
+tissuePcalc <-  function(exprMatrix, tissue, group) {
+  exprMatrix <- as.data.frame(exprMatrix)
+  wilcoxTest <- pairwise.wilcox.test(exprMatrix[,tissue], exprMatrix$geneGroup, p.adj = "bonf")
+  if (group == "disease") pDiseaseNoPheno <-  wilcoxTest$p.value[3,3]
+  else if (group == "cellEssential") pDiseaseNoPheno <-  wilcoxTest$p.value[3,2]
+  else pDiseaseNoPheno <- NA
+  return(pDiseaseNoPheno)
+}
+
+gtexTissuePs <- data.table(.y. = "Testis", group1 = "noPheno", group2 = c(rep("disease", 55), rep("cellEssential", 55)), gtex_tissue = rep(colnames(gtexTissueEnr)[5:59],2))
+gtexTissuePs <- gtexTissuePs[,"p_vs_NoPheno":=tissuePcalc(exprMatrix = gtexTissueEnr, tissue = gtex_tissue, group = group2),by=1:nrow(gtexTissuePs)] %>%
+  mutate(p.format = format.pval(p_vs_NoPheno, digits = 1, eps = 1e-100)) 
+
+write_tsv(gtexTissuePs, "gtexTissuePs.txt", col_names = T)
+
+
+#Format for plotting
+
+tissueEnrPlot <- function(tissue, pVals = gtexTissuePs, ylabel) {
+  pVals <- pVals %>% 
+    filter(gtex_tissue == tissue)
+  enrPlot <- ggplot(gtexTissueEnr, aes_string(x="geneGroup", y=tissue, fill = "geneGroup")) +
+    geom_violin(scale = "area") +
+    scale_fill_manual(values = myColorsother) +
+    geom_boxplot(width=0.05, fill="white", outlier.shape = NA) +
+    geom_signif(
+      data = pVals, 
+      aes(xmin = group2, xmax = group1, annotations = p.format, y_position = c(14,17)), 
+      manual= T, inherit.aes = FALSE, textsize = 8) +
+    theme(text = element_text(size=30)) +
+    ylab(paste0(ylabel, " log2(TPM)")) +
+    ylim(-10,20)
+  return(enrPlot)
+}
+
+medianPlot <- tissueEnrPlot(tissue = "Median", ylabel = "54 Tissue Median")
+testisPlot <- tissueEnrPlot(tissue = "Testis", ylabel = "Testis")
+
+develAll <- DFCmatrix %>% 
+  filter(pcDays < 280) %>% 
+  mutate(age = str_remove(age, " pcw")) %>% 
+  mutate(age = factor(age, levels = c("8","9","12","13","16","17","19","21","24","26","37"))) %>% 
+  ggplot(aes(x = age, y = value, fill = geneGroup)) +
+  geom_boxplot(outlier.shape = NA) +
+  scale_fill_manual(values = myColorsother) +
+  xlab("Age (weeks post conception)") +
+  ylab("log2(RPKM)") +
+  theme(text = element_text(size=30), legend.position = "none") +
+  ylim(-10,12) 
+
+(medianPlot + testisPlot) / develAll + plot_layout(guides = 'collect') + plot_annotation(tag_levels = 'a')
+```
+
+
+## Brainspan
+```{r Brainspan analysis, echo=FALSE, warning=FALSE, fig.height=10, fig.width=20}
+brainspanSamples <- read_csv("brainspan/columns_metadata.csv") %>% 
+  mutate(sampleID = paste0("sample", column_num)) %>% 
+  #Calculate days post conception (pc)
+  mutate(pcDays = ifelse(str_detect(age, pattern = "pcw"), 
+                         as.integer(str_remove(age, " pcw")) * 7, NA)) %>% 
+  mutate(pcDays = ifelse(str_detect(age, pattern = "mos"), 
+                         as.integer(str_remove(age, " mos")) * 30.44 + 280, pcDays)) %>% 
+  mutate(pcDays = ifelse(str_detect(age, pattern = "yrs"), 
+                         as.integer(str_remove(age, " yrs")) * 365.24 + 280, pcDays))
+
+hist(table(brainspanSamples$donor_id), breaks = 16, xlab = "tissues", ylab = "donors")
+hist(table(brainspanSamples$structure_acronym), breaks = 16, xlab = "samples", ylab = "tissues")
+
+brainspanRows <- read_csv("brainspan/rows_metadata.csv", col_types = 'iicci') %>% 
+  drop_na() %>% 
+  left_join(hgncIDs, by =c("entrez_id" = "entrez_gene_id") ) %>% 
+  select(row_num,hgnc_id, symbol) %>% 
+  distinct(hgnc_id, .keep_all = T) %>% 
+  filter(hgnc_id %in% gnomADGenes$hgnc_id)
+brainspanGenes <- fullMatrix %>% 
+  select(hgnc_id, geneGroup) %>% 
+  filter(geneGroup != "lowPLIpheno") %>% 
+  left_join(brainspanRows, by = "hgnc_id") %>% 
+  drop_na() 
+
+brainspanMatrix <- read_csv("brainspan/expression_matrix.csv", col_names = c("row_num", brainspanSamples$sampleID), col_types = cols(.default = col_double())) %>% 
+  filter(row_num %in% brainspanGenes$row_num) %>% 
+  left_join(brainspanGenes, by = "row_num")
+  
+DFCsamples <- brainspanSamples %>%
+  filter(structure_acronym == "DFC") %>% 
+  select(sampleID, pcDays, age)
+
+DFCmatrix <- brainspanMatrix %>% 
+  select(hgnc_id,geneGroup, DFCsamples$sampleID) %>% 
+  melt() %>% 
+  rename(sampleID = variable) %>% 
+  left_join(DFCsamples, by = "sampleID") %>% 
+  filter(value != 0) %>% 
+  mutate(value = log2(value))
+  
+DFCmatrix$geneGroup <- factor(DFCmatrix$geneGroup, levels = c("other", "cellEssential", "disease","noPheno"))
+DFCmatrix$age <- factor(DFCmatrix$age, levels = c("8 pcw", "9 pcw",  "12 pcw" ,"13 pcw" ,"16 pcw", "17 pcw", "19 pcw" ,"21 pcw", "24 pcw", "26 pcw" ,"37 pcw" ,"4 mos" , "10 mos", "1 yrs" , "2 yrs" ,"3 yrs" , "4 yrs" , "8 yrs" , "11 yrs" ,"13 yrs","18 yrs" ,"19 yrs" ,"21 yrs", "30 yrs", "36 yrs", "37 yrs", "40 yrs"))
+DFCmatrix %>% 
+  filter(pcDays < 280) %>% 
+  ggplot(mapping = aes(x = pcDays, y = value, group = hgnc_id, colour = geneGroup)) +
+  geom_point(aes(colour = geneGroup), alpha = 0.1) +
+  geom_line(alpha = 0.1) +
+  facet_grid(rows = vars(geneGroup)) +
+  scale_colour_manual(values = myColorsother)
+DFCmatrix %>% 
+  filter(pcDays < 280) %>% 
+  ggplot(aes(x = pcDays, y = value, group = hgnc_id, colour = geneGroup)) +
+  geom_point(aes(colour = geneGroup), alpha = 0.1) +
+  geom_line(alpha = 0.1) +
+  facet_grid(rows = vars(geneGroup)) +
+  scale_colour_manual(values = myColorsother)
+#Pre Birth all groups and just disease no Pheno
+develAll <- DFCmatrix %>% 
+  filter(pcDays < 280) %>% 
+  mutate(age = str_remove(age, " pcw")) %>% 
+  ggplot(aes(x = age, y = value, fill = geneGroup)) +
+  geom_boxplot(outlier.shape = NA) +
+  scale_fill_manual(values = myColorsother) +
+  xlab(paste0("Age (weeks post conception)")) +
+  ylab(paste0("Age (weeks post conception)")) +
+  theme(text = element_text(size=20), legend.position = "none") +
+  ylim(-10,10) +
+  stat_compare_means(label = "p.signif",comparisons = my_comparisons) 
+develAll
+DFCmatrix %>% 
+  filter(pcDays < 280) %>% 
+  filter(geneGroup == "noPheno" | geneGroup == "disease") %>% 
+  ggplot(aes(x = age, y = value, fill = geneGroup)) +
+  geom_boxplot(outlier.shape = NA) +
+  scale_fill_manual(values = c("#66CC99", "black")) +
+  stat_compare_means( aes(group =geneGroup), label = "p", size = 8) +
+  theme(text = element_text(size=20))
+#Post Birth all groups and just disease no Pheno
+DFCmatrix %>% 
+  filter(pcDays > 280) %>% 
+  ggplot(aes(x = age, y = value, fill = geneGroup)) +
+  geom_boxplot(outlier.shape = NA) +
+  scale_fill_manual(values = myColorsother) +
+  theme(text = element_text(size=20)) +
+  ylim(-10,10)
+DFCmatrix %>% 
+  filter(pcDays > 280) %>% 
+  filter(geneGroup == "noPheno" | geneGroup == "disease") %>% 
+  ggplot(aes(x = age, y = value, fill = geneGroup)) +
+  geom_boxplot(outlier.shape = NA) +
+  scale_fill_manual(values = c("#66CC99", "black")) +
+  stat_compare_means( aes(group =geneGroup), label = "p", size = 8) +
+  theme(text = element_text(size=20))
+```
+
+
+
+
+
