@@ -241,7 +241,7 @@ ddg2p_recessive <- ddg2p %>%
   distinct(`hgnc_id`)
 
 
-Get OMIM genes
+# Get OMIM genes
 omimGenes <- read_tsv("data/morbidmap_2019_10_08.txt", skip = 4, comment = '#', col_types = 'ccic',
                       col_names = c("Pheno", "Gene", "MIM_Number", "Cyto_Location")) %>%
   select(Pheno, Gene) %>%
@@ -344,7 +344,7 @@ llik3_genes <- read_tsv("data/forMatt_DDgene_likratio_gt3_2019_11_12.txt") %>%
 ceg2 <- read_tsv("data/CEG2.txt", col_names = c("gene", "hgnc_id"), col_types = 'cc') %>% 
   mutate(hgnc_id = str_remove(hgnc_id, "HGNC:"))
 
-cellEssential3hit <- read_tsv("TableS3.txt") %>% 
+cellEssential3hit <- read_tsv("data/TableS3.txt") %>% 
   #Remove screens filtered from study
   #rename(GENE = Gene) %>% 
   select(-BF_HELA,-BF_MV411,-BF_HT29, -BF_RPE1, -BF_K562) %>% 
@@ -510,7 +510,6 @@ fullMatrix <- baseMatrix %>%
   left_join(gtexMedianother, by = "hgnc_id") %>% 
   left_join(greeneCentrality, by = "hgnc_id") %>% 
   left_join(inWebCentrality, by = "hgnc_id") %>% 
-  left_join(probes, by = "hgnc_id") %>% 
   mutate(drugTargets = ifelse(hgnc_id %in% drugTargets$hgnc_id, 1, 0)) %>% 
   mutate(clinGenHaploinsufficient = ifelse(hgnc_id %in% clinGenHaploinsufficient$hgnc_id, 1, 0)) %>% 
   mutate(olfactoryReceptor = ifelse(hgnc_id %in% olfactoryReceptor$hgnc_id, 1, 0)) %>% 
