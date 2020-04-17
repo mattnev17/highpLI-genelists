@@ -187,12 +187,12 @@ getSig <- function(feat, groupA, groupB, other = "other", df, nsim = 10000) {
 Load in data and convert datasets with gene names to hgnc IDs for consistency/compatibility
 ```{r dataLoad, message=FALSE, warning=FALSE}
 #HGNC IDs for all protein coding genes
-hgncIDs <- read_tsv("hgncIDs2.txt", col_types = 'ccccic', skip = 1, 
+hgncIDs <- read_tsv("data/hgncIDs2.txt", col_types = 'ccccic', skip = 1, 
                     col_names = c('hgnc_id', 'symbol', 'alias_symbol','old_symbol', 'entrez_gene_id', 'ensembl_gene_id')) %>% 
   mutate(hgnc_id = str_remove(hgnc_id, "HGNC:"))
 
 #GnomadGenes
-gnomADGenes <- read_tsv("gnomad.constraint.txt.gz") %>% 
+gnomADGenes <- read_tsv("data/gnomad.constraint.txt.gz") %>% 
   select(gene, pLI, gene_id, exac_pLI, oe_lof_upper, syn_z, mis_z, cds_length, num_coding_exons, gene_length, obs_syn, obs_lof) %>% 
   mutate(lof_synRatio = obs_lof/obs_syn) %>% 
   select(-obs_syn, -obs_lof) %>% 
@@ -201,7 +201,7 @@ gnomADGenes <- read_tsv("gnomad.constraint.txt.gz") %>%
   distinct(hgnc_id, .keep_all = T)
 
 #Gene Discovery paper df
-load("../GeneDiscovery/output/Data/universe_df.rda")
+load("data/universe_df.rda")
 geneDiscovery <- universe_df %>% 
   mutate(hgnc_id = str_remove(hgnc_id, "HGNC:")) %>% 
   select(hgnc_id, omimGD = omim, human_lethal = human_lethal_B, any_reg_constraint, 
@@ -213,9 +213,9 @@ geneDiscovery <- universe_df %>%
   mutate(hgnc_id = as.character(hgnc_id))
 
 #Kaitlin and Joanna's gene features
-ddd19features <- read_tsv("gene_features.tab") 
+ddd19features <- read_tsv("data/gene_features.tab") 
 
-ddd19 <- read_tsv("extended_denovoWEST_results.tab") %>% 
+ddd19 <- read_tsv("data/extended_denovoWEST_results.tab") %>% 
   select(symbol, s_het, hgnc_id = num_hgnc_id ) %>% 
   mutate(hgnc_id = as.character(hgnc_id)) %>% 
   distinct() %>% 
@@ -226,7 +226,7 @@ ddd19 <- read_tsv("extended_denovoWEST_results.tab") %>%
 
 
 #Get DD2GP genes
-ddg2p <- read_csv("DDG2P_12_11_2019.csv") %>% 
+ddg2p <- read_csv("data/DDG2P_12_11_2019.csv") %>% 
   rename(hgnc_id = `hgnc id`)
 develGenes <- ddg2p %>% 
   filter(`DDD category` %in% c("probable","confirmed","both DD and IF")) %>% 
@@ -241,17 +241,16 @@ ddg2p_recessive <- ddg2p %>%
   distinct(`hgnc_id`)
 
 
-#Get OMIM genes
-omimGenes <- read_tsv("/Volumes/ddd0/mn7/morbidmap_2019_10_08.txt", skip = 4, comment = '#', col_types = 'ccic',
-                      col_names = c("Pheno", "Gene", "MIM_Number", "Cyto_Location")) %>% 
-  select(Pheno, Gene) %>% 
-  drop_na() %>% 
-  mutate(Gene = gsub(",.*", "", Gene)) %>% 
-  mutate(omim_nondisease = ifelse(grepl("\\[", Pheno), T,F)) %>% 
-  mutate(omim_complex = ifelse(grepl("\\{", Pheno), T,F)) %>% 
+Get OMIM genes
+omimGenes <- read_tsv("data/morbidmap_2019_10_08.txt", skip = 4, comment = '#', col_types = 'ccic',
+                      col_names = c("Pheno", "Gene", "MIM_Number", "Cyto_Location")) %>%
+  select(Pheno, Gene) %>%
+  drop_na() %>%
+  mutate(Gene = gsub(",.*", "", Gene)) %>%
+  mutate(omim_nondisease = ifelse(grepl("\\[", Pheno), T,F)) %>%
+  mutate(omim_complex = ifelse(grepl("\\{", Pheno), T,F)) %>%
   mutate(omim_provisional = ifelse(grepl("\\?", Pheno), T,F))
-#saveRDS(omimGenes, "omimGenes.rds")
-#omimGenes = readRDS("omimGenes.rds")
+
 omimConverted <- omimGenes %>% 
   filter(!omim_complex & !omim_nondisease) %>% 
   convertGeneToHGNC(geneCol = "Gene")
@@ -264,7 +263,7 @@ omimComplexConverted <- omimGenes %>%
 #getting inheritances
 # Extend OMIM data
 #Code from gene discovery paper
-omim <- read_tsv("/Volumes/ddd0/mn7/genemap2_2019_10_08.txt", skip = 3) %>% 
+omim <- read_tsv("data/genemap2_2019_10_08.txt", skip = 3) %>% 
   select(Gene = `Approved Symbol`, Phenotypes) %>% 
   drop_na() %>% 
   convertGeneToHGNC(geneCol = "Gene") 
@@ -289,7 +288,7 @@ omim_mono <- omim %>%
   select(hgnc_id)
 
 #Get Clinvar genes with a phenotype
-clinvarVCFfiltered <- read_tsv("clinvar_20191003.vcf.gz", comment = '#', col_names = F, col_types = 'cccccccccccccc') %>% 
+clinvarVCFfiltered <- read_tsv("data/clinvar_20191003.vcf.gz", comment = '#', col_names = F, col_types = 'cccccccccccccc') %>% 
   mutate(PHEN = str_remove(str_extract(X8, 'CLNDN=[^;]*;'), "CLNDN=")) %>% 
   mutate(PHEN = str_remove(PHEN, "not_provided")) %>% 
   mutate(PHEN = str_remove(PHEN, "|")) %>% 
@@ -338,11 +337,11 @@ clinvar_mono <- clinvarGenes %>%
   distinct(hgnc_id)
 
 #Log likelihood ratios for 1078 genes that are 3x as likely to be DD genes than not from K+J DDD paper
-llik3_genes <- read_tsv("forMatt_DDgene_likratio_gt3_2019_11_12.txt") %>% 
+llik3_genes <- read_tsv("data/forMatt_DDgene_likratio_gt3_2019_11_12.txt") %>% 
   select(hgnc_id = num_hgnc_id)
 
 #Core essential genes from moffat G3 paper
-ceg2 <- read_tsv("CEG2.txt", col_names = c("gene", "hgnc_id"), col_types = 'cc') %>% 
+ceg2 <- read_tsv("data/CEG2.txt", col_names = c("gene", "hgnc_id"), col_types = 'cc') %>% 
   mutate(hgnc_id = str_remove(hgnc_id, "HGNC:"))
 
 cellEssential3hit <- read_tsv("TableS3.txt") %>% 
@@ -359,7 +358,7 @@ cellEssential3hit <- read_tsv("TableS3.txt") %>%
 
 
 #Bayes factor for hap1 and kbm7 and Cell Essential Genes from Moffat Lab’s dataset on essentiality
-hap1Bayes <- read_tsv("TableS3.txt") %>% 
+hap1Bayes <- read_tsv("data/TableS3.txt") %>% 
   select(GENE, BF_HAP1) %>% 
   drop_na() %>% 
   convertGeneToHGNC(geneCol = "GENE") %>% 
@@ -367,7 +366,7 @@ hap1Bayes <- read_tsv("TableS3.txt") %>%
   arrange(hgnc_id, desc(BF_HAP1)) %>% 
   distinct(hgnc_id, .keep_all = T) %>% 
   select(-GENE)
-kbm7Bayes <- read_tsv("TableS3.txt") %>% 
+kbm7Bayes <- read_tsv("data/TableS3.txt") %>% 
   select(GENE, BF_KBM7) %>% 
   drop_na() %>% 
   convertGeneToHGNC(geneCol = "GENE") %>% 
@@ -378,7 +377,7 @@ kbm7Bayes <- read_tsv("TableS3.txt") %>%
 
 
 #Summed essentiality from Garnett lab’s SCORE project
-cancerCellLines <- read_csv("Supplementary Table 2 - Fitness genes and pathway enrichments.csv") %>%
+cancerCellLines <- read_csv("data/Supplementary Table 2 - Fitness genes and pathway enrichments.csv") %>%
   mutate(summed_cell_lines = rowSums(.[2:326])) %>% 
   mutate(gene = Gene.name) %>% 
   select(gene, summed_cell_lines) %>% 
@@ -389,7 +388,7 @@ cancerCellLines <- read_csv("Supplementary Table 2 - Fitness genes and pathway e
   select(-gene)
 
 #GTEX median gene expression by tissue
-gtexMedianother <- read_tsv("GTEx_Analysis_2017-06-05_v8_RNASeQCv1.1.9_gene_median_tpm.gct.gz", skip = 2) %>% 
+gtexMedianother <- read_tsv("data/GTEx_Analysis_2017-06-05_v8_RNASeQCv1.1.9_gene_median_tpm.gct.gz", skip = 2) %>% 
   mutate(tissuesTPMover1 = rowSums(.[3:56] >= 1)) %>% 
   mutate(tissuesTPMover5 = rowSums(.[3:56] >= 5)) %>% 
   mutate(tissuesTPMover10 = rowSums(.[3:56] >= 10)) %>% 
@@ -400,7 +399,7 @@ gtexMedianother <- read_tsv("GTEx_Analysis_2017-06-05_v8_RNASeQCv1.1.9_gene_medi
   distinct(hgnc_id, .keep_all = T) %>% 
   select(-gene)
 
-cosmicCancerGenes <- read_tsv("cosmicCancerGenes.tsv") %>% 
+cosmicCancerGenes <- read_tsv("data/cosmicCancerGenes.tsv") %>% 
   select(gene = `Entrez GeneId`) %>%
   drop_na() %>% 
   left_join(hgncIDs, by =c("gene" = "entrez_gene_id") ) %>% 
@@ -409,14 +408,14 @@ cosmicCancerGenes <- read_tsv("cosmicCancerGenes.tsv") %>%
 
 #Sexual reproduction GO
 
-reproductionGenes <- read_tsv("sexualReproductionGO.txt", col_names = c("gene", "GO", "organism")) %>% 
+reproductionGenes <- read_tsv("data/sexualReproductionGO.txt", col_names = c("gene", "GO", "organism")) %>% 
   distinct(gene) %>% 
   convertGeneToHGNC(geneCol = "gene") %>% 
   select(hgnc_id) %>% 
   unique()
   
 #Gene lists from Kim et al AJHG 2019
-kimLists <- read_tsv("geneListsKim19.txt", comment = '#') 
+kimLists <- read_tsv("data/geneListsKim19.txt", comment = '#') 
 #604 genes with no significant variant-gene association in all 48 tissues in GTEx v.7 single-tissue cis-eQTL data.
 eQTLdeficient <- kimLists %>% 
   select(gene = `eQTL0-deficient`) %>% 
@@ -445,12 +444,12 @@ exacHaploinsufficient <- kimLists %>%
   select(hgnc_id) %>% 
   unique()
 #Protein network centrality from two protein networks
-inWebCentrality <- read_tsv("inWebCentrality.txt", comment = '#') %>% 
+inWebCentrality <- read_tsv("data/inWebCentrality.txt", comment = '#') %>% 
   left_join(hgncIDs, by =c("ENTREZ" = "entrez_gene_id") ) %>% 
   rename(inweb_closeness = Closeness) %>% 
   select(hgnc_id, inweb_closeness) %>% 
   unique()
-greeneCentrality <- read_tsv("greeneCentrality.txt", comment = '#') %>% 
+greeneCentrality <- read_tsv("data/greeneCentrality.txt", comment = '#') %>% 
   left_join(hgncIDs, by =c("ENTREZ" = "entrez_gene_id") ) %>% 
   rename(greene_closeness = Closeness) %>% 
   select(hgnc_id, greene_closeness) %>% 
@@ -458,33 +457,18 @@ greeneCentrality <- read_tsv("greeneCentrality.txt", comment = '#') %>%
 
 
 #Gene lists clones from https://github.com/macarthur-lab/gene_lists
-drugTargets <- read_tsv("gene_lists/lists/fda_approved_drug_targets.tsv", col_names = "gene") %>% 
+drugTargets <- read_tsv("data/gene_lists/lists/fda_approved_drug_targets.tsv", col_names = "gene") %>% 
   convertGeneToHGNC(geneCol = "gene") 
-#mouseEssential <- read_tsv("gene_lists/lists/mgi_essential.tsv", col_names = "gene") %>% 
+#mouseEssential <- read_tsv("data/gene_lists/lists/mgi_essential.tsv", col_names = "gene") %>% 
 #  convertGeneToHGNC(geneCol = "gene")
-clinGenHaploinsufficient <- read_tsv("gene_lists/lists/clingen_level3_genes_2018_09_13.tsv", col_names = "gene") %>% 
+clinGenHaploinsufficient <- read_tsv("data/gene_lists/lists/clingen_level3_genes_2018_09_13.tsv", col_names = "gene") %>% 
   convertGeneToHGNC(geneCol = "gene")
-olfactoryReceptor <- read_tsv("gene_lists/lists/olfactory_receptors.tsv", col_names = "gene") %>% 
+olfactoryReceptor <- read_tsv("data/gene_lists/lists/olfactory_receptors.tsv", col_names = "gene") %>% 
   convertGeneToHGNC(geneCol = "gene")
-exacHomozygous_lof_tolerant <- read_tsv("gene_lists/lists/homozygous_lof_tolerant_twohit.tsv", col_names = "gene") %>% 
+exacHomozygous_lof_tolerant <- read_tsv("data/gene_lists/lists/homozygous_lof_tolerant_twohit.tsv", col_names = "gene") %>% 
   convertGeneToHGNC(geneCol = "gene")
-nearestGWAS_peakGene <- read_tsv("gene_lists/lists/gwascatalog.tsv", col_names = "gene") %>% 
+nearestGWAS_peakGene <- read_tsv("data/gene_lists/lists/gwascatalog.tsv", col_names = "gene") %>% 
   convertGeneToHGNC(geneCol = "gene")
-
-#Num probes in UKBB for that analysis
-#UKBB probe counts
-probes <- read_csv("../ukbb/Axiom_UKB_WCSG.na34.annot.csv", comment = "#") %>% 
-  select(affy_snp_id = `Affy SNP ID`, genes = `Associated Gene`) %>% 
-  filter(genes!= "---") %>% 
-  separate(genes, into = c("gene"), sep = " /// ", extra = "drop") %>% 
-  separate(gene, into = c("transcript", "csq", "c", "d", "gene", "f", "g"), sep = " // ") %>% 
-  drop_na() %>% 
-  filter(gene != "---" & csq != "downstream" & csq != "upstream") %>% 
-  group_by(gene) %>% 
-  summarize(n_probes = n()) %>% 
-  convertGeneToHGNC(geneCol = "gene") %>% 
-  select(-gene) %>% 
-  distinct(hgnc_id, .keep_all = T)
 
 ```
 
@@ -770,23 +754,101 @@ group.transformed %>%
   ylab("Log10(Mean high pLI group/Mean other set)") +
   stat_pvalue_manual(sigTableC, x = "feature", y.position = 1,label = "p = {p}",position = position_dodge(0.8), inherit.aes = FALSE)
 ```
-
 ### Report Enrichment 
 ```{r report_enrichment, echo=FALSE, fig.height=3, fig.width=6, warning=FALSE}
+#names of features in both dataframe and used for plotting
+sigTableReport = sigTablePs %>% 
+  filter(feature %in% c("pLI", "mis_z", "gene_length", "num_coding_exons", "PPI_BTWN", "median_fetalbrain_rpkm", "nearestGWAS_peakGene",  "relevant_go"))
+enrPlot <- group.transformed %>% 
+  filter(feature %in% c("pLI", "mis_z", "gene_length", "num_coding_exons", "PPI_BTWN", "median_fetalbrain_rpkm", "nearestGWAS_peakGene",  "relevant_go")) %>% 
+  ggplot(aes(group = group, fill = group, y=value, x=feature)) +
+  #coord_flip() +
+  ylim(-0.15,1.5) +
+  geom_bar(position="dodge", stat="identity") +
+  geom_errorbar(aes(ymin=lower, ymax=upper), width=.1,position=position_dodge(.9)) +
+  scale_fill_manual(values=myColorsCombo) +
+  theme_minimal(base_size = 15) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  geom_hline(yintercept = 0, colour = "darkgrey") +
+  ylab("Log10(Mean gene group/Mean 'other' group)") +
+  stat_pvalue_manual(sigTableReport, x = "feature", y.position = c(1.13,1.28, 1.13,1.28, 1.13,1.28, 1.13,1.28, 1.13,1.28, 1.13,1.28, 1.13,1.28, 1.13,1.28),label = "p = {p}", inherit.aes = FALSE, hjust = -0.05) +
+  
+  annotate("rect", xmin = 0.7, xmax = 1.3, ymin = 1.1, ymax =1.1, alpha=1,colour = "black") +
+  annotate("rect", xmin = 0.7, xmax = 0.7, ymin = 1.07, ymax =1.1, alpha=1, colour = "black") +
+  annotate("rect", xmin = 1.3, xmax = 1.3, ymin = 1.07, ymax =1.1, alpha=1, colour = "black") +
+  annotate("rect", xmin = 1, xmax = 1.3, ymin = 1.25, ymax =1.25, alpha=1,colour = "black") +
+  annotate("rect", xmin = 1, xmax = 1, ymin = 1.22, ymax =1.25, alpha=1, colour = "black") +
+  annotate("rect", xmin = 1.3, xmax = 1.3, ymin = 1.22, ymax =1.25, alpha=1, colour = "black") +
+
+  annotate("rect", xmin = 1.7, xmax = 2.3, ymin = 1.1, ymax =1.1, alpha=1,colour = "black") +
+  annotate("rect", xmin = 1.7, xmax = 1.7, ymin = 1.07, ymax =1.1, alpha=1, colour = "black") +
+  annotate("rect", xmin = 2.3, xmax = 2.3, ymin = 1.07, ymax =1.1, alpha=1, colour = "black") +
+  annotate("rect", xmin = 2, xmax = 2.3, ymin = 1.25, ymax =1.25, alpha=1,colour = "black") +
+  annotate("rect", xmin = 2, xmax = 2, ymin = 1.22, ymax =1.25, alpha=1, colour = "black") +
+  annotate("rect", xmin = 2.3, xmax = 2.3, ymin = 1.22, ymax =1.25, alpha=1, colour = "black") +
+  
+  annotate("rect", xmin = 2.7, xmax = 3.3, ymin = 1.1, ymax =1.1, alpha=1,colour = "black") +
+  annotate("rect", xmin = 2.7, xmax = 2.7, ymin = 1.07, ymax =1.1, alpha=1, colour = "black") +
+  annotate("rect", xmin = 3.3, xmax = 3.3, ymin = 1.07, ymax =1.1, alpha=1, colour = "black") +
+  annotate("rect", xmin = 3, xmax = 3.3, ymin = 1.25, ymax =1.25, alpha=1,colour = "black") +
+  annotate("rect", xmin = 3, xmax = 3, ymin = 1.22, ymax =1.25, alpha=1, colour = "black") +
+  annotate("rect", xmin = 3.3, xmax = 3.3, ymin = 1.22, ymax =1.25, alpha=1, colour = "black") +
+  
+  annotate("rect", xmin = 3.7, xmax = 4.3, ymin = 1.1, ymax =1.1, alpha=1,colour = "black") +
+  annotate("rect", xmin = 3.7, xmax = 3.7, ymin = 1.07, ymax =1.1, alpha=1, colour = "black") +
+  annotate("rect", xmin = 4.3, xmax = 4.3, ymin = 1.07, ymax =1.1, alpha=1, colour = "black") +
+  annotate("rect", xmin = 4, xmax = 4.3, ymin = 1.25, ymax =1.25, alpha=1,colour = "black") +
+  annotate("rect", xmin = 4, xmax = 4, ymin = 1.22, ymax =1.25, alpha=1, colour = "black") +
+  annotate("rect", xmin = 4.3, xmax = 4.3, ymin = 1.22, ymax =1.25, alpha=1, colour = "black") +
+  
+  annotate("rect", xmin = 4.7, xmax = 5.3, ymin = 1.1, ymax =1.1, alpha=1,colour = "black") +
+  annotate("rect", xmin = 4.7, xmax = 4.7, ymin = 1.07, ymax =1.1, alpha=1, colour = "black") +
+  annotate("rect", xmin = 5.3, xmax = 5.3, ymin = 1.07, ymax =1.1, alpha=1, colour = "black") +
+  annotate("rect", xmin = 5, xmax = 5.3, ymin = 1.25, ymax =1.25, alpha=1,colour = "black") +
+  annotate("rect", xmin = 5, xmax = 5, ymin = 1.22, ymax =1.25, alpha=1, colour = "black") +
+  annotate("rect", xmin = 5.3, xmax = 5.3, ymin = 1.22, ymax =1.25, alpha=1, colour = "black") +
+  
+  annotate("rect", xmin = 5.7, xmax = 6.3, ymin = 1.1, ymax =1.1, alpha=1,colour = "black") +
+  annotate("rect", xmin = 5.7, xmax = 5.7, ymin = 1.07, ymax =1.1, alpha=1, colour = "black") +
+  annotate("rect", xmin = 6.3, xmax = 6.3, ymin = 1.07, ymax =1.1, alpha=1, colour = "black") +
+  annotate("rect", xmin = 6, xmax = 6.3, ymin = 1.25, ymax =1.25, alpha=1,colour = "black") +
+  annotate("rect", xmin = 6, xmax = 6, ymin = 1.22, ymax =1.25, alpha=1, colour = "black") +
+  annotate("rect", xmin = 6.3, xmax = 6.3, ymin = 1.22, ymax =1.25, alpha=1, colour = "black") +
+  
+  annotate("rect", xmin = 6.7, xmax = 7.3, ymin = 1.1, ymax =1.1, alpha=1,colour = "black") +
+  annotate("rect", xmin = 6.7, xmax = 6.7, ymin = 1.07, ymax =1.1, alpha=1, colour = "black") +
+  annotate("rect", xmin = 7.3, xmax = 7.3, ymin = 1.07, ymax =1.1, alpha=1, colour = "black") +
+  annotate("rect", xmin = 7, xmax = 7.3, ymin = 1.25, ymax =1.25, alpha=1,colour = "black") +
+  annotate("rect", xmin = 7, xmax = 7, ymin = 1.22, ymax =1.25, alpha=1, colour = "black") +
+  annotate("rect", xmin = 7.3, xmax = 7.3, ymin = 1.22, ymax =1.25, alpha=1, colour = "black") +
+  
+  annotate("rect", xmin = 7.7, xmax = 8.3, ymin = 1.1, ymax =1.1, alpha=1,colour = "black") +
+  annotate("rect", xmin = 7.7, xmax = 7.7, ymin = 1.07, ymax =1.1, alpha=1, colour = "black") +
+  annotate("rect", xmin = 8.3, xmax = 8.3, ymin = 1.07, ymax =1.1, alpha=1, colour = "black") +
+  annotate("rect", xmin = 8, xmax = 8.3, ymin = 1.25, ymax =1.25, alpha=1,colour = "black") +
+  annotate("rect", xmin = 8, xmax = 8, ymin = 1.22, ymax =1.25, alpha=1, colour = "black") +
+  annotate("rect", xmin = 8.3, xmax = 8.3, ymin = 1.22, ymax =1.25, alpha=1, colour = "black")
+
+  
+enrPlot
+```
+
+### 2Report Enrichment 
+```{r 2report_enrichment, echo=FALSE, fig.height=3, fig.width=6, warning=FALSE}
 #names of features in both dataframe and used for plotting
 sigTableReportA = sigTablePs %>% 
   filter(feature %in% c("pLI", "mis_z", "gene_length", "num_coding_exons"))
 enrPlotA <- group.transformed %>% 
   filter(feature %in% c("pLI", "mis_z", "gene_length", "num_coding_exons")) %>% 
   ggplot(aes(group = group, fill = group, y=value, x=feature)) +
-  coord_flip() +
+  #coord_flip() +
   ylim(-0.25,1.5) +
   geom_bar(position="dodge", stat="identity") +
   geom_errorbar(aes(ymin=lower, ymax=upper), width=.1,position=position_dodge(.9)) +
   scale_fill_manual(values=myColorsCombo) +
   theme_minimal() +
   geom_hline(yintercept = 0, colour = "darkgrey") +
-  ylab("Log10(Mean high pLI group/Mean other set)") +
+  ylab("Log10(Mean gene group/Mean 'other' group)") +
   stat_pvalue_manual(sigTableReportA, x = "feature", y.position = 1.2,label = "p = {p}",position = position_dodge(0.8), inherit.aes = FALSE)
 
 sigTableReportB = sigTablePs %>% 
@@ -794,14 +856,14 @@ sigTableReportB = sigTablePs %>%
 enrPlotB <- group.transformed %>% 
   filter(feature %in% c("PPI_BTWN", "median_fetalbrain_rpkm", "nearestGWAS_peakGene",  "relevant_go")) %>% 
   ggplot(aes(group = group, fill = group, y=value, x=feature)) +
-  coord_flip() +
+  #coord_flip() +
   ylim(-0.25,1.5) +
   geom_bar(position="dodge", stat="identity") +
   geom_errorbar(aes(ymin=lower, ymax=upper), width=.1,position=position_dodge(.9)) +
   scale_fill_manual(values=myColorsCombo) +
   theme_minimal() +
   geom_hline(yintercept = 0, colour = "darkgrey") +
-  ylab("Log10(Mean high pLI group/Mean other set)") +
+  ylab("Log10(Mean gene group/Mean 'other' group)") +
   stat_pvalue_manual(sigTableReportB, x = "feature", y.position = 1.2,label = "p = {p}",position = position_dodge(0.8), inherit.aes = FALSE)
 
 enrPlotA + enrPlotB + plot_layout(guides = 'collect')
@@ -877,7 +939,7 @@ GOessential <- read_tsv("GO/cellEssentialGOhighpLIbackground.txt")
 ## GTEX
 ```{r gtex analysis, echo=FALSE, warning=FALSE, fig.height=6, fig.width=15}
 
-gtexMedian <- read_tsv("GTEx_Analysis_2017-06-05_v8_RNASeQCv1.1.9_gene_median_tpm.gct.gz", skip = 2) %>% 
+gtexMedian <- read_tsv("data/GTEx_Analysis_2017-06-05_v8_RNASeQCv1.1.9_gene_median_tpm.gct.gz", skip = 2) %>% 
   rename(gene = Description) %>%
   convertGeneToHGNC(geneCol = "gene") %>% 
   mutate(tissuesTPMover5 = rowSums(.[3:56] >= 5)) %>% 
@@ -1028,7 +1090,7 @@ develAll <- DFCmatrix %>%
 
 ## Brainspan
 ```{r Brainspan analysis, echo=FALSE, warning=FALSE, fig.height=10, fig.width=20}
-brainspanSamples <- read_csv("brainspan/columns_metadata.csv") %>% 
+brainspanSamples <- read_csv("data/brainspan/columns_metadata.csv") %>% 
   mutate(sampleID = paste0("sample", column_num)) %>% 
   #Calculate days post conception (pc)
   mutate(pcDays = ifelse(str_detect(age, pattern = "pcw"), 
@@ -1041,7 +1103,7 @@ brainspanSamples <- read_csv("brainspan/columns_metadata.csv") %>%
 hist(table(brainspanSamples$donor_id), breaks = 16, xlab = "tissues", ylab = "donors")
 hist(table(brainspanSamples$structure_acronym), breaks = 16, xlab = "samples", ylab = "tissues")
 
-brainspanRows <- read_csv("brainspan/rows_metadata.csv", col_types = 'iicci') %>% 
+brainspanRows <- read_csv("data/brainspan/rows_metadata.csv", col_types = 'iicci') %>% 
   drop_na() %>% 
   left_join(hgncIDs, by =c("entrez_id" = "entrez_gene_id") ) %>% 
   select(row_num,hgnc_id, symbol) %>% 
@@ -1053,7 +1115,7 @@ brainspanGenes <- fullMatrix %>%
   left_join(brainspanRows, by = "hgnc_id") %>% 
   drop_na() 
 
-brainspanMatrix <- read_csv("brainspan/expression_matrix.csv", col_names = c("row_num", brainspanSamples$sampleID), col_types = cols(.default = col_double())) %>% 
+brainspanMatrix <- read_csv("data/brainspan/expression_matrix.csv", col_names = c("row_num", brainspanSamples$sampleID), col_types = cols(.default = col_double())) %>% 
   filter(row_num %in% brainspanGenes$row_num) %>% 
   left_join(brainspanGenes, by = "row_num")
   
@@ -1123,8 +1185,3 @@ DFCmatrix %>%
   stat_compare_means( aes(group =geneGroup), label = "p", size = 8) +
   theme(text = element_text(size=20))
 ```
-
-
-
-
-
